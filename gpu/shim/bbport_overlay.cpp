@@ -15,6 +15,7 @@
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
+#include "common/elf_info.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
