@@ -539,6 +539,7 @@ static ABI void *posix_mmap(void *addr, uint64_t size, int prot, int flags, int 
     if (result) { *runtime_errno()=result==NO_MEMORY ? POSIX_ENOMEM : POSIX_EINVAL; return (void *)-1; }
     return out;
 }
+static ABI int32_t posix_msync(void *address, uint64_t size, int flags) { (void)address; (void)size; (void)flags; return 0; }
 static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
@@ -640,6 +641,7 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
     return batch_map2(entries,count,processed,MAP_FIXED_FLAG);
 }
 static const RuntimeExport exports[]={
+    {"mmap",posix_mmap}, {"msync",posix_msync},
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},
