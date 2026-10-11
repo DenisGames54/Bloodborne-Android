@@ -18,7 +18,7 @@
   </tr>
 </table>
 
-Port of Bloodborne (PS4, **CUSA03173 v1.09**). The runtime and renderer run natively on ARM64, FEXCore translates the game's x86-64 code, and Mesa Turnip drives the GPU. Experimental.
+Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and renderer run natively on ARM64, FEXCore translates the game's x86-64 code, and Mesa Turnip drives the GPU. Experimental.
 
 ## Features
 
@@ -42,8 +42,20 @@ Other Adreno 6xx/7xx/8xx devices are untested. Requires Android 9+ and 4 KB memo
 ## Install
 
 1. Download the APK from [Releases](https://github.com/ducvd89/Bloodborne-Android/releases/latest) and install it.
-2. Copy your own extracted **CUSA03173 v1.09** dump to the phone.
-3. Open the app, select the folder containing `eboot.bin`, and allow storage access. The first launch takes a few minutes.
+2. Copy your own extracted dump of Bloodborne with the **1.09 update** merged into it to the phone (any release below).
+3. Open the app, select the folder containing `eboot.bin` (or the folder that holds it), and allow storage access. The first launch takes a few minutes.
+
+Every retail release runs the same 1.09 executable, so all of them work:
+
+| Region | Bloodborne | Game of the Year / The Old Hunters |
+|---|---|---|
+| US | CUSA00900 | CUSA03179 |
+| EU | CUSA00207 | CUSA03173 |
+| UK | CUSA00208 | |
+| Japan | CUSA00299 | CUSA03014 |
+| Asia | CUSA01363 | CUSA03023 |
+
+Use the original 1.09 `eboot.bin`. Some dumps ship one with a 60 fps patch already applied; that one crashes in the gestures menu.
 
 The APK contains no game files. Updates keep settings and saves.
 
@@ -69,7 +81,7 @@ Each entry shows its current setting underneath.
 - **Infinite health:** your HP refills to full every frame.
 - **Infinite blood vials and items:** using a blood vial, bullet or other item leaves its count as it was. Items you move to storage or give away stay in your inventory too.
 
-They are code hooks for Bloodborne 1.09 (the same places as Shiningami's GoldHEN cheats for CUSA03173), always in place and switched by flags the game process reads from the app.
+They are code hooks in the 1.09 executable (the same places as Shiningami's GoldHEN cheats), so they work on every release. They are always in place and switched by flags the game process reads from the app.
 
 ## Lossless Scaling frame generation
 
