@@ -25,7 +25,7 @@ Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and rende
 - **Cheats** — new in 0.5.0: infinite health and infinite blood vials/items, switched on and off while you play
 - **Game settings** in the app's menu: skip the online/offline screen (straight to the main menu), skip intros, free camera, debug menu
 - **Lossless Scaling frame generation** (2×, 3×, 4×). Sign in with Steam in the app and it downloads `Lossless.dll` from your own copy of Lossless Scaling
-- **FSR 3.1** upscaling and **FSR 3.1 frame generation**
+- **FSR 3.1** upscaling and **FSR 3.1 frame generation**. FSR 3.1 frame generation has poor image quality for now; try Lossless Scaling frame generation instead
 - **On-screen PlayStation controller** with an editable layout; physical controllers work too
 - **Two Vulkan drivers in one APK**, picked automatically for your GPU
 - 16:9 picture on any screen, including foldables
@@ -97,7 +97,7 @@ The sign-in is used once, for that download. The app keeps no password and no si
 Tips:
 
 - Frames are smoothest when the screen refresh rate is the FPS limit × the multiplier. The app sets the screen to that rate when it can: 30 FPS × 2 → 60 Hz, 30 × 4, 40 × 3 or 60 × 2 → 120 Hz.
-- It works with any upscaler and replaces FSR 3.1 frame generation. It sees only finished frames, without the game's motion vectors, so fast motion and the HUD show more artifacts than with FSR 3.1 frame generation.
+- It works with any upscaler and replaces FSR 3.1 frame generation. It sees only finished frames, without the game's motion vectors, so fast motion and the HUD can show artifacts.
 - Technical details: [docs/ANDROID_LSFG.md](docs/ANDROID_LSFG.md).
 
 ## Build
