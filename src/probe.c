@@ -147,6 +147,49 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 #ifndef _WIN32
+/* Fault diagnostics for a guest fault: registers, the code bytes around RIP (disassemble with
+ * objdump -D -b binary -m i386:x86-64 on a file made of them) and the first words of the stack and
+ * the rbp chain, where values inside the image are shown as guest offsets (return addresses).
+ * Reads use process_vm_readv, so a bad pointer cannot fault again. */
+static int fault_read(uintptr_t at, void *out, size_t size) {
+    struct iovec local = {out, size}, remote = {(void *)at, size};
+    return at && process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+static void fault_dump_guest(const GuestRegs *r) {
+    static const char *const names[GUEST_GPRS] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                                  "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+    char line[320];
+    for (int i = 0; i < GUEST_GPRS; i += 4) {
+        int n = snprintf(line, sizeof(line), "  %s=%#lx %s=%#lx %s=%#lx %s=%#lx\n",
+                         names[i], (unsigned long)r->gpr[i], names[i + 1], (unsigned long)r->gpr[i + 1],
+                         names[i + 2], (unsigned long)r->gpr[i + 2], names[i + 3], (unsigned long)r->gpr[i + 3]);
+        ssize_t w = write(2, line, (size_t)n); (void)w;
+    }
+    unsigned char code[64];
+    if (fault_read((uintptr_t)r->rip - 32, code, sizeof(code))) {
+        int n = snprintf(line, sizeof(line), "  code at rip-32 (guest offset %#lx):", (unsigned long)(r->rip - 32 - (uintptr_t)image));
+        for (int i = 0; i < 64; ++i) n += snprintf(line + n, sizeof(line) - (size_t)n, "%s%02x", i == 32 ? " | " : " ", code[i]);
+        line[n++] = '\n';
+        ssize_t w = write(2, line, (size_t)n); (void)w;
+    }
+    uint64_t stack[24];
+    if (fault_read((uintptr_t)r->gpr[GUEST_RSP], stack, sizeof(stack))) {
+        for (int i = 0; i < 24; ++i) {
+            const int in_image = stack[i] - (uintptr_t)image < 0x10000000;
+            int n = snprintf(line, sizeof(line), in_image ? "  [rsp+%#x] = image+%#lx\n" : "  [rsp+%#x] = %#lx\n",
+                             i * 8, in_image ? (unsigned long)(stack[i] - (uintptr_t)image) : (unsigned long)stack[i]);
+            ssize_t w = write(2, line, (size_t)n); (void)w;
+        }
+    }
+    uintptr_t rbp = (uintptr_t)r->gpr[GUEST_RBP];
+    for (int depth = 0; depth < 16; ++depth) {
+        uintptr_t frame[2];
+        if (!fault_read(rbp, frame, sizeof(frame)) || frame[0] <= rbp) break;
+        int n = snprintf(line, sizeof(line), "  rbp chain %d: return image+%#lx\n", depth, (unsigned long)(frame[1] - (uintptr_t)image));
+        ssize_t w = write(2, line, (size_t)n); (void)w;
+        rbp = frame[0];
+    }
+}
 static void fault(int sig, siginfo_t *info, void *context) {
     /* The guest CPU's own faults (FEXCore's JIT), then GPU page tracking (write-protected guest pages). */
     if (guest_cpu_handle_fault(sig, info, context)) return;
@@ -176,6 +219,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (in_guest == GUEST_CPU_IN_GUEST && regs.rip - (uintptr_t)image < 0x10000000) fault_dump_guest(&regs);
     if (in_guest == GUEST_CPU_IN_HOST_CALL && regs.rip - (uintptr_t)image < 0x10000000) {
         snprintf(line, sizeof(line), "  called by the game at guest offset 0x%lx\n", (unsigned long)(regs.rip - (uintptr_t)image));
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
