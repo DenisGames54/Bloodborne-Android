@@ -12,24 +12,37 @@ export FEX_ROOTFS="$base/rootfs"
 export FEX_APP_CONFIG_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_DATA_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_CACHE_LOCATION="$HOME/.cache/fex-emu/"
-# Turnip: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
-# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides the choice.
-turnip=${BB_TURNIP:-}
-if [ -z "$turnip" ]; then
-    case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
-        0x44*) turnip=gen8 ;;
-        *) turnip=main ;;
-    esac
-fi
-icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-[ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
-    icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
-echo "Turnip: ${icd##*/}"
-export VK_DRIVER_FILES="$icd"
-export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 export GLIBC_TUNABLES='glibc.cpu.hwcaps=-AVX2,-AVX,-AVX_Fast_Unaligned_Load,-AVX2_Usable,-AVX_Usable'
 export BB_CONFIG="$base/bbport.ini"
 [ -f "$BB_CONFIG" ] || cp "$base/bbport.default.ini" "$BB_CONFIG"
+setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
+# The GPU driver. One the player installed from a zip (the app's GPU driver menu, DriverManager.java)
+# turns the automatic choice off: drivers/<gpu_driver>/icd.json names its library there, the zip's
+# other libraries beside it. Without one (gpu_driver empty or not installed), the bundled Turnip by
+# GPU: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
+# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides that choice.
+gpu_driver=$(setting gpu_driver)
+case $gpu_driver in .*|*/*) gpu_driver= ;; esac
+if [ -n "$gpu_driver" ] && [ -f "$files/drivers/$gpu_driver/icd.json" ]; then
+    icd="$files/drivers/$gpu_driver/icd.json"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$files/drivers/$gpu_driver"
+    echo "GPU driver: $gpu_driver (installed from a zip, automatic choice off)"
+else
+    [ -n "$gpu_driver" ] && echo "GPU driver $gpu_driver is not installed: automatic choice"
+    turnip=${BB_TURNIP:-}
+    if [ -z "$turnip" ]; then
+        case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
+            0x44*) turnip=gen8 ;;
+            *) turnip=main ;;
+        esac
+    fi
+    icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+    [ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
+        icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
+    echo "Turnip: ${icd##*/}"
+fi
+export VK_DRIVER_FILES="$icd"
+export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 if [ "${BB_ANDROID_INPUT:-0}" = 1 ]; then
     export BB_PAD_FILE="$base/android-pad.state" BB_PAD_QUIET=1
     # Text the game asks for (the character name): the app's touch keyboard.
@@ -43,7 +56,6 @@ if [ "${BB_ANDROID_INPUT:-0}" = 1 ]; then
 fi
 # Graphics settings (the app's settings screen writes bbport.ini). The output is the Thor's
 # 1280x720 display; the preset sets the scene size, FSR 3.1 upscales it to the output.
-setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
 upscaler=$(setting upscaler); preset=$(setting preset)
 # FSR 4 and 4.1.1 (INT8 models) are not offered: on the Thor's Adreno 740 FSR 4 took ~3 min to
 # compile in Turnip, then ran at 2.4 FPS (~470 ms of GPU time a frame) with a black scene, and with

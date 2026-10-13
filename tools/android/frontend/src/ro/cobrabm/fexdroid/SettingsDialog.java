@@ -112,6 +112,15 @@ final class SettingsDialog {
         } catch (Exception ex) { android.util.Log.e("Bloodborne","settings: "+ex); return false; }
         return temporary.renameTo(file);
     }
+    /** One setting, written at once (the GPU driver menu). Before the first start the file is
+     *  the defaults (bbport.default.ini, as run-thor.sh would copy it) plus this line. */
+    boolean set(String key,String value) {
+        File defaults=new File(file.getParentFile(),"bbport.default.ini");
+        if (!file.isFile() && defaults.isFile())
+            try { java.nio.file.Files.copy(defaults.toPath(),file.toPath()); }
+            catch (Exception ex) { android.util.Log.e("Bloodborne","settings: "+ex); }
+        load(); Map<String,String> changed=new LinkedHashMap<>(); changed.put(key,value); return save(changed);
+    }
 
     private TextView heading(LinearLayout box,String title) {
         TextView t=new TextView(activity); t.setText(title); t.setTextSize(15);
