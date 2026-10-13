@@ -20,6 +20,27 @@
 
 Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and renderer run natively on ARM64, FEXCore translates the game's x86-64 code, and Mesa Turnip drives the GPU. Experimental.
 
+## How it works
+
+This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs in an Android app process, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
+
+**Translated while the game runs:**
+
+| What | From | To | By |
+|---|---|---|---|
+| The game's CPU code (`eboot.bin`) | x86-64 (AVX, BMI) | ARM64 | [FEXCore](https://github.com/FEX-Emu/FEX), built into the game process as a library: only the game's code goes through it, no x86 Linux, Wine or Box64 |
+| GPU commands the game writes itself (it links libGnm statically) | AMD GCN command buffers (PM4) | Vulkan commands | the renderer |
+| Shaders | AMD GCN | SPIR-V | the renderer's shader recompiler |
+
+**Native ARM64 code, no translation:**
+
+- **Runtime**: replaces the PS4 system libraries the game imports: threads, mutexes, semaphores, memory, time, files, save data, controller input, audio with ATRAC9 decoding, video output, movie playback. A call from the game goes straight to this code.
+- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1, Lossless Scaling frame generation.
+- **Vulkan driver**: Mesa Turnip, shipped in the APK.
+- **The Android app**: menu, on-screen controller, Steam sign-in.
+
+FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 precision). The PC build has no translation layer at all: there, the game's x86-64 code runs directly on the CPU.
+
 ## Features
 
 - **Cheats** — new in 0.5.0: infinite health and infinite blood vials/items, switched on and off while you play
