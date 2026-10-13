@@ -31,7 +31,7 @@ class SelfTests(unittest.TestCase):
             struct.pack_into('<IIQQQQQQ',data,216,0x61000000,4,0x2000,0,0,256,0,16)
             struct.pack_into('<IIQQQQQQ',data,272,2,4,0x20b0,0,0,80,80,8)
             data[0x200]=instruction
-            name=b'bzQExy189ZI#C#A\0'
+            name=b'bzQExy189ZI#libkernel\0'
             data[0x220:0x220+len(name)]=name
             struct.pack_into('<IBBHQQ',data,0x260,0,0x12,0,1,0,1)
             for i,(tag,value) in enumerate([(0x61000035,0),(0x61000037,32),(0x61000039,64),(0x6100003f,24),(0,0)]):

@@ -234,11 +234,11 @@ static int read_faults(volatile unsigned char *p) {
 }
 typedef int32_t (ABI *Protect)(const void *, uint64_t, int);
 static void write_traps(void) {
-    Allocate alloc=GET(Allocate,"rTXw65xmLIA#p#J");
-    Map map=GET(Map,"L-Q3LEjIbgA#p#J");
-    Unmap unmap=GET(Unmap,"cQke9UuBQOk#p#J");
-    Release release=GET(Release,"MBuItvba6z8#p#J");
-    Protect protect=GET(Protect,"vSMAm3cxYTY#p#J");
+    Allocate alloc=GET(Allocate,"rTXw65xmLIA#libkernel");
+    Map map=GET(Map,"L-Q3LEjIbgA#libkernel");
+    Unmap unmap=GET(Unmap,"cQke9UuBQOk#libkernel");
+    Release release=GET(Release,"MBuItvba6z8#libkernel");
+    Protect protect=GET(Protect,"vSMAm3cxYTY#libkernel");
     const uint64_t pool=536870912, length=16384;
     int64_t a=-1;
     void *x=NULL;
