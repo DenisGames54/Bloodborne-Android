@@ -196,6 +196,27 @@ case ${1:-game} in
             echo 'Python runtime missing; cannot prepare the selected game files' >&2
             exit 2
         fi
+        # Loose-file mods (mods_enabled, default on): a symlink overlay of the game folder, built
+        # after prepare_game.py (it needs the original eboot). mods_android.py prints the folder to
+        # run (the overlay, or the game itself when no valid enabled mod); it never fails the launch.
+        mods_dir=$(setting mods_dir)
+        [ -n "$mods_dir" ] || mods_dir=/storage/emulated/0/Bloodborne/mods
+        export BB_MODS_DIR="$mods_dir"
+        [ -n "${BB_MOD_TRACE:-}" ] && export BB_MOD_TRACE
+        app0_dir=$game_dir
+        if [ "$(setting mods_enabled)" != 0 ] && [ -x "$host/usr/bin/python3.13" ]; then
+            mods_game=$(PYTHONHOME="$host/usr" "$host/usr/bin/python3.13" "$base/scripts/mods_android.py" apply \
+                --game "$game_dir" --out "$base/mod-game" --mods-dir "$mods_dir" \
+                --config "$base/mods.json" | tail -n 1) || mods_game=
+            if [ -n "$mods_game" ] && [ -f "$mods_game/eboot.bin" ]; then
+                app0_dir=$mods_game
+            else
+                echo 'Mods: could not be set up, starting without them'
+            fi
+        else
+            echo 'Mods: off'
+        fi
+        [ "$app0_dir" = "$game_dir" ] && rm -rf "$base/mod-game"
         # The native ARM64 build (runtime and GPU native, the game's code in FEXCore) when it is
         # installed; BB_THOR_X86=1: the whole x86-64 loader under FEX instead.
         if [ -x "$base/arm64/bin/bb-probe" ] && [ "${BB_THOR_X86:-0}" != 1 ]; then
@@ -233,7 +254,7 @@ case ${1:-game} in
         fi
         exec "$@" \
             --content-profile "$base/data/content.bin" \
-            --app0 "$game_dir" --user "$base/user" --timeout "${BB_TIMEOUT:-0}"
+            --app0 "$app0_dir" --user "$base/user" --timeout "${BB_TIMEOUT:-0}"
         ;;
     *) echo 'usage: run-thor.sh cpu|vulkan|renderer|window|gamepads|controller|game' >&2; exit 2 ;;
 esac

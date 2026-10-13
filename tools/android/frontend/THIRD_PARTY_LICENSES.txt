@@ -33,6 +33,22 @@ zstd-jni (BSD-2-Clause, Luben Karavelov; bundles Zstandard, BSD). The QR code
 is drawn with ZXing core 3.5.4 (Apache-2.0). Menu icons: Material Design icons
 (Apache-2.0, Google).
 
+Mods (unpacking .zip and .7z mod archives): Apache Commons Compress 1.26.1, Apache
+Commons IO 2.15.1 and Apache Commons Codec 1.16.1 (all Apache-2.0), with the XZ for
+Java and Apache Commons Lang 3 libraries above. Their notices:
+
+Apache Commons Compress
+Copyright 2002-2024 The Apache Software Foundation
+
+Apache Commons IO
+Copyright 2002-2023 The Apache Software Foundation
+
+Apache Commons Codec
+Copyright 2002-2024 The Apache Software Foundation
+
+These products include software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
 FSR 3.1: AMD FidelityFX (MIT) through
 FireBurn/FSR-Vulkan.
 
@@ -57,3 +73,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+PS4 PKG unpacking (mods, game and update PKGs): ps4-pkg-tool
+https://github.com/xXJSONDeruloXx/ps4-pkg-tools (shadPS4's PKG/PFS code), GPL-2.0-or-later,
+with Crypto++ (Boost Software License 1.0) and zlib. It is a separate program in the app's
+runtime; its full notice, source revision and this project's patches are in
+bbport/licenses/ps4-pkg-tool.NOTICE and tools/android/ps4-pkg-tool.NOTICE in the source.

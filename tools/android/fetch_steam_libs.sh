@@ -4,7 +4,9 @@
 # JavaSteam (MIT, a Java port of SteamKit2) with its dependencies, xz and zstd-jni (Android build:
 # its arm64 library) to unpack depot chunks, Spongy Castle (Bouncy Castle licence: the crypto provider
 # JavaSteam uses on Android, as Android's own "BC" provider lacks AES/ECB) to decrypt manifests, and
-# ZXing core (Apache 2.0) to draw the sign-in QR code.
+# ZXing core (Apache 2.0) to draw the sign-in QR code. The Mods menu (ModArchive.java) unpacks .zip
+# and .7z mod archives with Apache Commons Compress (Apache 2.0) and its commons-io and commons-codec
+# (the 7z LZMA/LZMA2 coders are the xz library above).
 # Resolved with a pinned Apache Maven into .local-deps/android/steam-libs/{jars,jni}; build_frontend.sh
 # dexes the jars into the APK.
 set -euo pipefail
@@ -13,7 +15,7 @@ deps=$PWD/.local-deps/android
 out=$deps/steam-libs
 MAVEN_VERSION=3.9.11
 MAVEN_SHA512=bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
-JAVASTEAM=1.8.0 XZ=1.12 ZSTD=1.5.7-6 ZXING=3.5.4 SPONGY=1.58.0.0
+JAVASTEAM=1.8.0 XZ=1.12 ZSTD=1.5.7-6 ZXING=3.5.4 SPONGY=1.58.0.0 COMPRESS=1.26.1
 if [[ ! -x $deps/maven/bin/mvn ]]; then
     curl -sfL -o "$deps/maven.tar.gz" \
         "https://archive.apache.org/dist/maven/maven-3/$MAVEN_VERSION/binaries/apache-maven-$MAVEN_VERSION-bin.tar.gz"
@@ -33,11 +35,12 @@ cat > "$work/pom.xml" <<EOF
     <dependency><groupId>com.madgag.spongycastle</groupId><artifactId>prov</artifactId><version>$SPONGY</version>
       <exclusions><exclusion><groupId>junit</groupId><artifactId>junit</artifactId></exclusion></exclusions></dependency>
     <dependency><groupId>com.google.zxing</groupId><artifactId>core</artifactId><version>$ZXING</version></dependency>
+    <dependency><groupId>org.apache.commons</groupId><artifactId>commons-compress</artifactId><version>$COMPRESS</version></dependency>
   </dependencies>
 </project>
 EOF
 rm -rf "$out"; mkdir -p "$out/jars" "$out/jni"
-"$deps/maven/bin/mvn" -q -B -f "$work/pom.xml" -Dmaven.repo.local="$deps/m2" \
+"$deps/maven/bin/mvn" -q -B ${BB_MVN_OFFLINE:+-o} -f "$work/pom.xml" -Dmaven.repo.local="$deps/m2" \
     dependency:copy-dependencies -DoutputDirectory="$work/deps" -DincludeScope=runtime
 for file in "$work"/deps/*; do
     case $file in
