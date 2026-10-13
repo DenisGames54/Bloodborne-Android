@@ -44,7 +44,7 @@ public final class MainActivity extends Activity {
     private String FILES, ROOT, BASE;
     /** The game (e.g. CUSA03173, with eboot.bin) in shared storage, chosen by the player. */
     private String gameDir;
-    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3;
+    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3; // 4-6: ModsDialog, 7-8: GameInstaller
     private SurfaceHolder pendingHolder;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
@@ -55,7 +55,7 @@ public final class MainActivity extends Activity {
     private LinearLayout drawerItems;
     private TextView status;
     private View resume;
-    private LinearLayout gameSettingsItem, cheatsItem, graphicsItem, losslessItem, steamItem, driverItem, controllerItem, folderItem;
+    private LinearLayout gameSettingsItem, cheatsItem, modsItem, graphicsItem, losslessItem, steamItem, driverItem, controllerItem, folderItem;
     private TouchControllerOverlay controllerOverlay;
     private PadBridge pad;
     private AudioBridge audio;
@@ -66,6 +66,8 @@ public final class MainActivity extends Activity {
     private DriverManager drivers;
     private volatile boolean customDriver;
     private DriverDownloadDialog driverDownload;
+    private ModsDialog mods;
+    private GameInstaller installer;
     private volatile long gameStartedAt;
     private boolean drawerOpen, displayOnly, startingX, hadError, swipeConsumed;
     private float touchX, touchY;
@@ -77,6 +79,8 @@ public final class MainActivity extends Activity {
         FILES="/data/data/"+getPackageName()+"/files";
         ROOT=FILES+"/rootfs"; BASE=FILES+"/bbport";
         drivers=new DriverManager(new File(FILES));
+        GameInstaller.Host host=modsHost();
+        mods=new ModsDialog(this,host); installer=new GameInstaller(this,host);
         gameDir=getSharedPreferences("bloodborne",MODE_PRIVATE).getString("game_dir",null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT>=28) {
@@ -186,6 +190,7 @@ public final class MainActivity extends Activity {
             closeDrawer();
             new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).showCheats();
         });
+        modsItem=menuItem("ic_extension","Mods","",() -> { closeDrawer(); mods.show(); });
         menuItem("ic_refresh","Restart game","Unsaved progress is lost",() -> new AlertDialog.Builder(this)
             .setTitle("Restart Bloodborne?").setMessage("Any unsaved progress will be lost.")
             .setNegativeButton("Cancel",null).setPositiveButton("Restart",(dialog,which) -> restartGame()).show());
@@ -311,6 +316,7 @@ public final class MainActivity extends Activity {
         if ("1".equals(setting("cheat_health"))) cheats.add("infinite health");
         if ("1".equals(setting("cheat_items"))) cheats.add("infinite items");
         setDetail(cheatsItem,cheats.isEmpty() ? "Off" : String.join(" · ",cheats));
+        mods.summary(text -> setDetail(modsItem,text));
         String upscaler="off".equals(setting("upscaler")) ? "No upscaling" : "FSR 3.1";
         String limit=setting("fps_limit");
         setDetail(graphicsItem,upscaler+" · "+("0".equals(limit) ? "no FPS limit"
@@ -438,6 +444,14 @@ public final class MainActivity extends Activity {
         if ("close-menu".equals(action)) closeDrawer();
     }
 
+    /** SIGTERM first: mods_android.py then stops the PKG tool it started and removes its staging
+     *  folder (a SIGKILL would leave the tool extracting on its own); SIGKILL if it hangs. */
+    private static void stopScript(Process p) {
+        if (!p.isAlive()) return;
+        p.destroy();
+        try { if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly(); }
+        catch (InterruptedException e) { p.destroyForcibly(); Thread.currentThread().interrupt(); }
+    }
     private Process process(String... args) throws java.io.IOException {
         ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
@@ -533,11 +547,17 @@ public final class MainActivity extends Activity {
                 try { startActivityForResult(pick,REQUEST_FOLDER); }
                 catch (Exception ex) { error("No folder picker: "+ex); }
             })
+            .setNeutralButton("Install from PKG…",(d,w) -> installer.start())
             .setNegativeButton(change ? "Cancel" : "Quit",(d,w) -> { if (!change) finish(); })
             .setCancelable(change).show();
     }
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(code,permissions,results);
+        if (code==ModsDialog.REQUEST_STORAGE) {
+            boolean granted=results.length>0;
+            for (int r:results) granted&=r==android.content.pm.PackageManager.PERMISSION_GRANTED;
+            mods.storageResult(granted); return;
+        }
         if (code!=REQUEST_STORAGE) return;
         if (results.length>0 && results[0]==android.content.pm.PackageManager.PERMISSION_GRANTED) {
             if (hasGame()) startPending(); else askGameFolder(false);
@@ -549,6 +569,8 @@ public final class MainActivity extends Activity {
             if (result==RESULT_OK && data!=null && data.getData()!=null) installDriver(data.getData());
             return;
         }
+        if (code==ModsDialog.REQUEST_FOLDER || code==ModsDialog.REQUEST_ARCHIVE) { mods.onResult(code,result,data); return; }
+        if (code==GameInstaller.REQUEST_PKG || code==GameInstaller.REQUEST_DEST) { installer.onResult(code,result,data); return; }
         if (code!=REQUEST_FOLDER) return;
         if (result!=RESULT_OK || data==null || data.getData()==null) { if (!hasGame()) askGameFolder(false); return; }
         File dir=folderOf(data.getData());
@@ -566,16 +588,104 @@ public final class MainActivity extends Activity {
         status.setText("Starting Bloodborne…");
         if (changed && game!=null) restartGame(); else startPending();
     }
+    /** The game was installed from PKGs: the same as choosing its folder, and the game starts (again). */
+    private void useInstalledGame(File dir) {
+        gameDir=dir.getPath();
+        getSharedPreferences("bloodborne",MODE_PRIVATE).edit().putString("game_dir",gameDir).apply();
+        status.setText("Starting Bloodborne…"); status.setVisibility(View.VISIBLE);
+        if (shmid>=0) restartGame(); else startPending(); // the display runs already when the game was stopped for the install
+    }
     /** A storage folder of the picker (tree document "primary:Path" or "XXXX-XXXX:Path") as a path. */
-    private static File folderOf(android.net.Uri tree) {
+    static File folderOf(android.net.Uri tree) {
         try {
             String id=android.provider.DocumentsContract.getTreeDocumentId(tree);
             int colon=id.indexOf(':');
             String volume=colon<0 ? id : id.substring(0,colon), path=colon<0 ? "" : id.substring(colon+1);
-            File base="primary".equalsIgnoreCase(volume) ? android.os.Environment.getExternalStorageDirectory()
-                                                         : new File("/storage/"+volume);
-            return path.isEmpty() ? base : new File(base,path);
+            return DocPath.volume(android.os.Environment.getExternalStorageDirectory(),volume,path);
         } catch (Exception ex) { return null; }
+    }
+    /** The file path of a picked document ("primary:Download/x.pkg", "XXXX-XXXX:x", "raw:/storage/..."), or
+     *  null for other providers (the caller copies the content instead). */
+    private File pathOf(android.net.Uri document) {
+        try {
+            if ("file".equals(document.getScheme())) return new File(document.getPath());
+            if (!android.provider.DocumentsContract.isDocumentUri(this,document)) return null;
+            return DocPath.document(document.getAuthority(),android.provider.DocumentsContract.getDocumentId(document),
+                android.os.Environment.getExternalStorageDirectory());
+        } catch (Exception ex) { return null; }
+    }
+    private GameInstaller.Host modsHost() {
+        return new GameInstaller.Host() {
+            @Override public String script(String... args) throws java.io.IOException {
+                if (!new File(BASE,ModsDialog.SCRIPT).isFile()) return null;
+                Process p=process(scriptCommand(ModsDialog.SCRIPT,args));
+                try {
+                    StringBuilder out=new StringBuilder();
+                    try (BufferedReader r=new BufferedReader(new InputStreamReader(p.getInputStream(),"UTF-8"))) {
+                        for (String line; (line=r.readLine())!=null && out.length()<(4<<20);) out.append(line).append('\n');
+                    }
+                    p.waitFor(30,java.util.concurrent.TimeUnit.SECONDS);
+                    return out.toString();
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.io.IOException("Interrupted"); }
+                finally { p.destroyForcibly(); }
+            }
+            @Override public boolean scriptStream(String script,java.util.function.Consumer<String> lines,AtomicBoolean cancel,String... args) throws java.io.IOException {
+                if (!new File(BASE,script).isFile()) return false;
+                Process p=process(scriptCommand(script,args));
+                // Cancel (or the app closing) stops the process, which ends the read below.
+                Thread watch=new Thread(() -> {
+                    while (p.isAlive()) {
+                        if (cancel.get() || destroyed) { stopScript(p); return; }
+                        try { Thread.sleep(100); } catch (InterruptedException e) { return; }
+                    }
+                },"Mods-cancel");
+                watch.setDaemon(true); watch.start();
+                try (BufferedReader r=new BufferedReader(new InputStreamReader(p.getInputStream(),"UTF-8"))) {
+                    for (String line; (line=r.readLine())!=null;) lines.accept(line);
+                    p.waitFor();
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                finally { stopScript(p); watch.interrupt(); }
+                return true;
+            }
+            @Override public File pathOf(android.net.Uri document) { return MainActivity.this.pathOf(document); }
+            @Override public boolean hasStorage() {
+                return Build.VERSION.SDK_INT<23 || (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                    ==android.content.pm.PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    ==android.content.pm.PackageManager.PERMISSION_GRANTED);
+            }
+            @Override public void requestStorage() {
+                requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE},ModsDialog.REQUEST_STORAGE);
+            }
+            @Override public void pick(Intent intent,int code) { startActivityForResult(intent,code); }
+            @Override public File folderOf(android.net.Uri tree) { return MainActivity.folderOf(tree); }
+            @Override public String setting(String key) { return MainActivity.this.setting(key); }
+            @Override public boolean set(String key,String value) {
+                return new SettingsDialog(MainActivity.this,new File(BASE,"bbport.ini"),MainActivity.this::restartGame).set(key,value);
+            }
+            @Override public File baseDir() { return new File(BASE); }
+            @Override public String gameDir() { return gameDir; }
+            @Override public boolean gameRunning() { Process p=game; return p!=null && p.isAlive(); }
+            @Override public void stopGame() { MainActivity.this.stopGame(); }
+            @Override public void useGame(File dir) { useInstalledGame(dir); }
+            @Override public void installEnded(boolean stopped) {
+                if (destroyed) return;
+                if (!hasGame()) askGameFolder(false);
+                else if (stopped && shmid>=0) restartGame(); // the install stopped the game and did not finish
+            }
+            @Override public void toast(String message) { MainActivity.this.toast(message); }
+            @Override public void restart() { restartGame(); }
+            @Override public void closed() { if (!destroyed) immersive(); }
+            @Override public boolean destroyed() { return destroyed; }
+        };
+    }
+    /** The runtime's tool scripts (mods.sh) run in the rootfs shell, like run-thor.sh. */
+    private String[] scriptCommand(String script,String[] args) {
+        String[] command=new String[args.length+2];
+        command[0]=ROOT+"/bin/sh"; command[1]=BASE+"/"+script;
+        System.arraycopy(args,0,command,2,args.length);
+        return command;
     }
     private void startPending() {
         SurfaceHolder h=pendingHolder!=null ? pendingHolder : surface.getHolder();
@@ -842,7 +952,7 @@ public final class MainActivity extends Activity {
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {
-        destroyed=true; if (driverDownload!=null) driverDownload.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
+        destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
         DisplayBridge.stop(); stopGame(); if (xvfb!=null) xvfb.destroyForcibly();
         worker.shutdownNow(); super.onDestroy();
     }

@@ -18,6 +18,8 @@ from fetch_arm64_sysroot import MIRROR, SUITE, extract_deb, fetch, parse_package
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / '.local-deps/android/migration/x/rootfs'
 NATIVE = ROOT / 'out/arm64/bundle'
+PKG_TOOL = ROOT / 'out/arm64/pkg-tool/ps4-pkg-tool'  # build_pkg_tool.sh (the bundle/ dir is rebuilt wholesale)
+PKG_TOOL_NOTICE = ROOT / 'tools/android/ps4-pkg-tool.NOTICE'
 TURNIP = ROOT / 'out/arm64/turnip'
 TURNIP_GEN8 = ROOT / 'out/arm64/turnip-gen8'
 LSFG = ROOT / 'out/arm64/lsfg'  # build_lsfg.sh: the lsfg-vk 1.0 layer with our Turnip patches
@@ -36,7 +38,7 @@ TURNIP_GEN8_FILES = {
 OUT = ROOT / 'out/release'
 PYTHON = ('python3.13-minimal', 'libpython3.13-minimal', 'libpython3.13-stdlib')
 SCRIPTS = ('prepare_game.py', 'prepare.py', 'link_modules.py', 'link_libc.py',
-           'content_profile.py', 'game_check.py')
+           'content_profile.py', 'game_check.py', 'mods.py', 'mods_android.py')
 EXCLUDE_ROOTFS = ('dev', 'home', 'root', 'run', 'tmp', 'var', 'opt',
                   'usr/include', 'usr/share/man',
                   'etc/shadow', 'etc/shadow-', 'etc/gshadow', 'etc/gshadow-',
@@ -84,6 +86,11 @@ def scrub(member):
     return member
 
 
+def without_pkg_tool(member):
+    # build_pkg_tool.sh also copies the tool into bundle/bin: it is added once, below.
+    return None if member.name.endswith('/bin/ps4-pkg-tool') else member
+
+
 def owned_by_root(member):
     member.uid = member.gid = 0
     member.uname = member.gname = ''
@@ -95,6 +102,8 @@ def main():
         raise SystemExit('Missing migrated FEX/Turnip rootfs')
     if not (NATIVE / 'bin/bb-probe').is_file() or not (NATIVE / 'lib/libbbcpu.so').is_file():
         raise SystemExit('Build the native ARM64 bundle first')
+    if not PKG_TOOL.is_file():
+        raise SystemExit('Build the PKG tool first: tools/android/build_pkg_tool.sh arm64')
     if not all((TURNIP / name).is_file() for name in TURNIP_FILES.values()):
         raise SystemExit('Build Turnip first: tools/android/build_turnip.sh')
     if not all((TURNIP_GEN8 / name).is_file() for name in TURNIP_GEN8_FILES.values()):
@@ -128,13 +137,17 @@ def main():
             info.mode = mode
             tar.addfile(info)
         for directory in ('bin', 'lib', 'patch-parts'):
-            tar.add(NATIVE / directory, arcname='bbport/arm64/' + directory)
+            tar.add(NATIVE / directory, arcname='bbport/arm64/' + directory, filter=without_pkg_tool)
         tar.add(LSFG, arcname='bbport/arm64/lsfg', filter=owned_by_root)
+        tar.add(PKG_TOOL, arcname='bbport/arm64/bin/ps4-pkg-tool', filter=owned_by_root)
+        tar.add(PKG_TOOL_NOTICE, arcname='bbport/licenses/ps4-pkg-tool.NOTICE', filter=owned_by_root)
         for script in SCRIPTS:
-            origin = (ROOT / 'tools/android' if script == 'prepare_game.py' else ROOT / 'scripts') / script
+            origin = (ROOT / 'tools/android' if script in ('prepare_game.py', 'mods_android.py')
+                      else ROOT / 'scripts') / script
             tar.add(origin, arcname='bbport/scripts/' + script)
         for source, name in (
             ('tools/android/run-thor.sh', 'run-thor.sh'),
+            ('tools/android/mods.sh', 'mods.sh'),
             ('tools/android/fex-compatible.json', 'fex-compatible.json'),
             ('tools/android/thor-gamecontrollerdb.txt', 'thor-gamecontrollerdb.txt'),
             ('tools/android/thor.ini', 'bbport.default.ini'),
