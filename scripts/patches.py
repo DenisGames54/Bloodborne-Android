@@ -217,6 +217,15 @@ def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE):
     return out
 
 
+def game_app_version(game):
+    """APP_VER of the game folder's param.sfo ("01.02"), or None when it cannot be read."""
+    try:
+        from prepare import sfo
+        return sfo((Path(game) / 'sce_sys/param.sfo').read_bytes()).get('APP_VER')
+    except (OSError, ValueError, ImportError):
+        return None
+
+
 def eboot_segments(elf):
     phoff,=struct.unpack_from('<Q',elf,0x20)
     phentsize,phnum=struct.unpack_from('<HH',elf,0x36)
