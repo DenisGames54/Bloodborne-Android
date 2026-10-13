@@ -44,7 +44,7 @@ public final class MainActivity extends Activity {
     private String FILES, ROOT, BASE;
     /** The game (e.g. CUSA03173, with eboot.bin) in shared storage, chosen by the player. */
     private String gameDir;
-    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2;
+    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3;
     private SurfaceHolder pendingHolder;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
@@ -55,13 +55,18 @@ public final class MainActivity extends Activity {
     private LinearLayout drawerItems;
     private TextView status;
     private View resume;
-    private LinearLayout gameSettingsItem, cheatsItem, graphicsItem, losslessItem, steamItem, controllerItem, folderItem;
+    private LinearLayout gameSettingsItem, cheatsItem, graphicsItem, losslessItem, steamItem, driverItem, controllerItem, folderItem;
     private TouchControllerOverlay controllerOverlay;
     private PadBridge pad;
     private AudioBridge audio;
     private volatile Process xvfb, game;
     private volatile int shmid=-1;
     private volatile boolean destroyed;
+    /** Vulkan drivers installed from zips (the GPU driver menu); whether the running game uses one. */
+    private DriverManager drivers;
+    private volatile boolean customDriver;
+    private DriverDownloadDialog driverDownload;
+    private volatile long gameStartedAt;
     private boolean drawerOpen, displayOnly, startingX, hadError, swipeConsumed;
     private float touchX, touchY;
     private boolean edgeGesture, imeOpen, imePolling;
@@ -71,6 +76,7 @@ public final class MainActivity extends Activity {
         super.onCreate(saved);
         FILES="/data/data/"+getPackageName()+"/files";
         ROOT=FILES+"/rootfs"; BASE=FILES+"/bbport";
+        drivers=new DriverManager(new File(FILES));
         gameDir=getSharedPreferences("bloodborne",MODE_PRIVATE).getString("game_dir",null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT>=28) {
@@ -198,6 +204,7 @@ public final class MainActivity extends Activity {
             closeDrawer();
             new SteamDllDialog(this,new File(BASE,"Lossless.dll")).show();
         });
+        driverItem=menuItem("ic_memory","GPU driver","",() -> { closeDrawer(); showDrivers(); });
 
         section("Controls");
         controllerItem=menuItem("ic_gamepad","On-screen controller","",() -> {
@@ -315,6 +322,8 @@ public final class MainActivity extends Activity {
         File found=losslessDll();
         setDetail(steamItem,found==null ? "Sign in with your Steam account"
             : found.getParent().equals(BASE) ? "Downloaded from Steam" : "Using Lossless.dll next to the game folder");
+        DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
+        setDetail(driverItem,driver==null ? "Built-in Turnip" : driver.title()+" · automatic choice off");
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
         setDetail(folderItem,gameDir==null ? "Not chosen" : gameDir);
     }
@@ -536,6 +545,10 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int code,int result,Intent data) {
         super.onActivityResult(code,result,data);
+        if (code==REQUEST_DRIVER) {
+            if (result==RESULT_OK && data!=null && data.getData()!=null) installDriver(data.getData());
+            return;
+        }
         if (code!=REQUEST_FOLDER) return;
         if (result!=RESULT_OK || data==null || data.getData()==null) { if (!hasGame()) askGameFolder(false); return; }
         File dir=folderOf(data.getData());
@@ -574,7 +587,11 @@ public final class MainActivity extends Activity {
 
     private void pollFrames() {
         if (destroyed) return;
-        if (!hadError && DisplayBridge.directFrames()>0) status.setVisibility(View.GONE);
+        Process running=game;
+        // A driver from a zip without this app's Mesa patches presents through X11, which the bridge
+        // shows without counting it: the start text goes once that game has run for a while.
+        if (!hadError && (DisplayBridge.directFrames()>0 || customDriver && running!=null && running.isAlive()
+                && android.os.SystemClock.uptimeMillis()-gameStartedAt>20000)) status.setVisibility(View.GONE);
         main.postDelayed(this::pollFrames,1000);
     }
 
@@ -621,6 +638,141 @@ public final class MainActivity extends Activity {
         } catch (Exception ex) { android.util.Log.e("Bloodborne","text answer: "+ex); return; }
         if (!temporary.renameTo(result)) android.util.Log.e("Bloodborne","text answer: rename failed");
     }
+    // ---- GPU driver: the bundled Turnip or one installed from a zip (DriverManager, run-thor.sh) ----
+    private void showDrivers() {
+        java.util.List<DriverManager.Driver> list=drivers.list();
+        DriverManager.Driver current=drivers.find(setting("gpu_driver"));
+        String[] names=new String[list.size()+1];
+        names[0]="Built-in Turnip (automatic by GPU)";
+        int checked=0;
+        for (int i=0;i<list.size();++i) {
+            names[i+1]=list.get(i).title();
+            if (current!=null && current.id.equals(list.get(i).id)) checked=i+1;
+        }
+        int[] choice={checked};
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("GPU driver")
+            .setSingleChoiceItems(names,checked,(d,which) -> {
+                choice[0]=which;
+                ((AlertDialog)d).getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(which>0);
+            })
+            .setPositiveButton("Use",(d,w) -> useDriver(choice[0]==0 ? null : list.get(choice[0]-1)))
+            .setNeutralButton("Add driver…",(d,w) -> askAddDriver())
+            .setNegativeButton("Delete",(d,w) -> { if (choice[0]>0) deleteDriver(list.get(choice[0]-1)); })
+            .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(choice[0]>0));
+        dialog.setOnDismissListener(d -> immersive());
+        dialog.show();
+    }
+    /** A driver comes from the app's GitHub releases or from a zip on the device. */
+    private void askAddDriver() {
+        new AlertDialog.Builder(this).setTitle("Add a GPU driver")
+            .setItems(new String[]{"Download from GitHub","Install a zip from this device"},(d,which) -> {
+                if (which==0) showDriverDownloads(); else askDriverZip();
+            })
+            .setNegativeButton("Cancel",null).setOnDismissListener(d -> immersive()).show();
+    }
+    private void showDriverDownloads() {
+        if (driverDownload!=null) driverDownload.close();
+        driverDownload=new DriverDownloadDialog(this,drivers,new File(FILES),new DriverDownloadDialog.Host() {
+            @Override public String gpuVariant() { return MainActivity.this.gpuVariant(); }
+            @Override public void use(DriverManager.Driver driver) { useDriver(driver); }
+            @Override public void closed() { if (!destroyed) immersive(); }
+            @Override public boolean destroyed() { return destroyed; }
+        });
+        driverDownload.show();
+    }
+    /** The bundled Turnip that suits this GPU, as run-thor.sh chooses it from kgsl-chip-id's output
+     *  (0x44... is Adreno 8xx): "gen8", "main", or null when the GPU cannot be read. Blocks. */
+    private String gpuVariant() {
+        try {
+            Process p=process(BASE+"/arm64/bin/kgsl-chip-id");
+            try {
+                if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) return null;
+                String line=new BufferedReader(new InputStreamReader(p.getInputStream())).readLine();
+                if (line==null || !line.trim().startsWith("0x")) return null;
+                return line.trim().startsWith("0x44") ? "gen8" : "main";
+            } finally { p.destroyForcibly(); }
+        } catch (Exception ex) {
+            android.util.Log.w("Bloodborne","GPU detection: "+ex);
+            return null;
+        }
+    }
+    private void askDriverZip() {
+        new AlertDialog.Builder(this).setTitle("Install a GPU driver")
+            .setMessage("Choose a zip with a Linux (glibc) build of Turnip, such as the Turnip builds for "
+                +"Winlator or Mobox. Turnip for Android (adrenotools zips) cannot load here.\n\n"
+                +"Drivers without this app's Mesa patches show the picture through X11, which is slower, and "
+                +"may not work with Lossless Scaling. A driver you install turns off the automatic choice of Turnip by GPU. "
+                +"If the game stops, choose Built-in Turnip again.")
+            .setNegativeButton("Cancel",null)
+            .setPositiveButton("Choose zip",(d,w) -> {
+                Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/zip","application/x-zip-compressed",
+                        "application/octet-stream"});
+                try { startActivityForResult(pick,REQUEST_DRIVER); }
+                catch (Exception ex) { toast("No file picker: "+ex); }
+            }).show();
+    }
+    private void installDriver(android.net.Uri zip) {
+        String zipName="driver.zip";
+        try (android.database.Cursor c=getContentResolver().query(zip,
+                new String[]{android.provider.OpenableColumns.DISPLAY_NAME},null,null,null)) {
+            if (c!=null && c.moveToFirst() && c.getString(0)!=null) zipName=c.getString(0);
+        } catch (Exception ignored) {}
+        final String name=zipName;
+        AlertDialog progress=new AlertDialog.Builder(this).setTitle("GPU driver")
+            .setMessage("Installing "+name+"…").setCancelable(false).show();
+        Thread install=new Thread(() -> {
+            DriverManager.Driver installed=null; String failure=null;
+            try (java.io.InputStream in=getContentResolver().openInputStream(zip)) {
+                if (in==null) throw new java.io.IOException("Cannot open "+name);
+                installed=drivers.install(in,name);
+            } catch (Exception ex) {
+                failure=ex.getMessage()!=null ? ex.getMessage() : ex.toString();
+                android.util.Log.e("Bloodborne","driver install: "+ex);
+            }
+            DriverManager.Driver result=installed; String problem=failure;
+            main.post(() -> {
+                progress.dismiss();
+                if (destroyed) return;
+                if (result==null) new AlertDialog.Builder(this).setTitle("Driver not installed").setMessage(problem)
+                    .setPositiveButton("OK",null).setOnDismissListener(d -> immersive()).show();
+                else new AlertDialog.Builder(this).setTitle("Driver installed")
+                    .setMessage(result.title()+" is installed. Use it now?")
+                    .setNegativeButton("Later",null).setPositiveButton("Use",(d,w) -> useDriver(result))
+                    .setOnDismissListener(d -> immersive()).show();
+            });
+        },"Driver-install");
+        install.setDaemon(true); install.start();
+    }
+    /** Picks the driver for the next start (null: the bundled Turnip) and offers the restart. */
+    private void useDriver(DriverManager.Driver driver) {
+        String id=driver==null ? "" : driver.id, before=setting("gpu_driver");
+        if (id.equals(before==null ? "" : before)) return;
+        if (!new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",id)) {
+            toast("Could not save the GPU driver setting."); return;
+        }
+        askRestart(driver==null ? "the built-in Turnip" : driver.title());
+    }
+    private void deleteDriver(DriverManager.Driver driver) {
+        new AlertDialog.Builder(this).setTitle("Delete "+driver.title()+"?")
+            .setNegativeButton("Cancel",(d,w) -> showDrivers())
+            .setPositiveButton("Delete",(d,w) -> {
+                boolean active=driver.id.equals(setting("gpu_driver"));
+                if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver","");
+                try { drivers.delete(driver.id); }
+                catch (Exception ex) { toast("Could not delete the driver: "+ex.getMessage()); return; }
+                if (active) askRestart("the built-in Turnip"); else showDrivers();
+            }).show();
+    }
+    private void toast(String message) { android.widget.Toast.makeText(this,message,android.widget.Toast.LENGTH_LONG).show(); }
+    private void askRestart(String driver) {
+        if (shmid<0 || displayOnly) return; // the game has not started: it starts with this driver
+        new AlertDialog.Builder(this).setTitle("Restart Bloodborne?")
+            .setMessage("The game uses "+driver+" after a restart. Any unsaved progress will be lost.")
+            .setNegativeButton("Later",null).setPositiveButton("Restart",(d,w) -> restartGame())
+            .setOnDismissListener(d -> immersive()).show();
+    }
     /** The last value of a bbport.ini setting (as run-thor.sh reads it), or null. */
     private String setting(String key) {
         String value=null;
@@ -661,6 +813,8 @@ public final class MainActivity extends Activity {
         if (destroyed) return;
         hadError=false;
         pickRefreshRate();
+        customDriver=drivers.find(setting("gpu_driver"))!=null;
+        gameStartedAt=android.os.SystemClock.uptimeMillis();
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
             Process launched=process(ROOT+"/bin/sh",BASE+"/run-thor.sh","game"); game=launched;
@@ -688,7 +842,7 @@ public final class MainActivity extends Activity {
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {
-        destroyed=true; pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
+        destroyed=true; if (driverDownload!=null) driverDownload.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
         DisplayBridge.stop(); stopGame(); if (xvfb!=null) xvfb.destroyForcibly();
         worker.shutdownNow(); super.onDestroy();
     }
