@@ -385,20 +385,25 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
 }
 
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
+#define DIRECT_FAIL(code) do { \
+        printf("Runtime: direct allocation failed (" #code "): low=0x%" PRIx64 " high=0x%" PRIx64 " size=%" PRIu64 \
+               " alignment=0x%" PRIx64 " type=%d; pool %" PRIu64 " MiB, in use %" PRIu64 " MiB\n", \
+               (uint64_t)low, (uint64_t)high, size, alignment, type, POOL_SIZE >> 20, live_bytes >> 20); \
+        return code; } while (0)
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
     if (!alignment) alignment = PAGE;
     if (!out || low < 0 || high < 0 || !size || size % PAGE || !valid_alignment(alignment) || type < 0 || type > 10)
-        return INVALID;
+        DIRECT_FAIL(INVALID);
     uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
-    if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
+    if ((uint64_t)low >= end || size > end - (uint64_t)low) DIRECT_FAIL(NO_SPACE);
     write_lock();
-    if (pool()) { write_unlock(); return NO_MEMORY; }
+    if (pool()) { write_unlock(); DIRECT_FAIL(NO_MEMORY); }
     uint64_t start = align_up((uint64_t)low, alignment);
     int slot = -1;
     for (int i=0; i<LIMIT; ++i) if (!blocks[i].used) { slot=i; break; }
     for (;;) {
-        if (slot<0 || start > end || size > end-start) { write_unlock(); return NO_SPACE; }
+        if (slot<0 || start > end || size > end-start) { write_unlock(); DIRECT_FAIL(NO_SPACE); }
         int overlap = 0;
         for (int i=0; i<LIMIT; ++i) {
             Block b = blocks[i];
@@ -415,6 +420,7 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     printf("Runtime: direct allocation offset=0x%" PRIx64 ", size=%" PRIu64 " bytes, type=%d\n", start, size, type);
     return 0;
 }
+#undef DIRECT_FAIL
 static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!out || physical < 0 || (uint64_t)physical % PAGE || !size || size % PAGE || !valid_alignment(alignment) ||
