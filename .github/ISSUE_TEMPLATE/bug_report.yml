@@ -1,0 +1,100 @@
+name: Bug report
+description: A crash, a graphics problem, bad performance or something in the app that does not work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please check the [open issues](https://github.com/ducvd89/Bloodborne-Android/issues) first, and write one problem per report.
+        Do not attach game files (eboot.bin, PKGs, game data): they cannot be shared here.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Phone or handheld model and its chip.
+      placeholder: AYN Thor, Snapdragon 8 Gen 2 (Adreno 740)
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version and system
+      placeholder: Android 13, stock / ColorOS 15 / HyperOS 2
+    validations:
+      required: true
+  - type: input
+    id: ram
+    attributes:
+      label: RAM
+      placeholder: 12 GB
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: Shown at the bottom of the menu and under **Check for updates**.
+      placeholder: "0.8.0"
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game release
+      description: The folder name (CUSA number) of your game, with the 1.09 update merged in.
+      placeholder: CUSA03173, 1.09
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: GPU driver
+      description: Menu → Graphics → GPU driver (the detail line under it).
+      placeholder: Built-in (Mesa main) / turnip-v37-recipe-adreno-6xx-7xx-8xx
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings that differ from the defaults
+      description: Graphics settings, Lossless Scaling, cheats, mods. Write "defaults" if you did not change anything.
+      placeholder: Lossless Scaling 2×, flow 0.75; model detail Game default; 2 mods on
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected and what happened instead. Copy any message the app shows exactly, e.g. "Game stopped (23)".
+    validations:
+      required: true
+  - type: dropdown
+    id: when
+    attributes:
+      label: When does it happen
+      options:
+        - At start, before the title screen
+        - At the title screen or main menu
+        - While playing, in one place (say where below)
+        - While playing, anywhere after a while
+        - In the app's menu, outside the game
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it happen again
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where in the game
+      description: Area and what was on screen (boss, cutscene, menu). Screenshots or a short video help a lot; drag them into this box.
+  - type: textarea
+    id: log
+    attributes:
+      label: Game log (optional)
+      description: |
+        If you can use adb from a PC, attach the game log of the session that went wrong:
+        `adb shell run-as com.ducvd89.bloodborne cat files/bbport/logs/android-game.log > android-game.log`
+        Drag the file into this box rather than pasting it.
