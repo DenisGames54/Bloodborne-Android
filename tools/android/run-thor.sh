@@ -12,24 +12,37 @@ export FEX_ROOTFS="$base/rootfs"
 export FEX_APP_CONFIG_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_DATA_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_CACHE_LOCATION="$HOME/.cache/fex-emu/"
-# Turnip: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
-# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides the choice.
-turnip=${BB_TURNIP:-}
-if [ -z "$turnip" ]; then
-    case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
-        0x44*) turnip=gen8 ;;
-        *) turnip=main ;;
-    esac
-fi
-icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-[ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
-    icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
-echo "Turnip: ${icd##*/}"
-export VK_DRIVER_FILES="$icd"
-export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 export GLIBC_TUNABLES='glibc.cpu.hwcaps=-AVX2,-AVX,-AVX_Fast_Unaligned_Load,-AVX2_Usable,-AVX_Usable'
 export BB_CONFIG="$base/bbport.ini"
 [ -f "$BB_CONFIG" ] || cp "$base/bbport.default.ini" "$BB_CONFIG"
+setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
+# The GPU driver. One the player installed from a zip (the app's GPU driver menu, DriverManager.java)
+# turns the automatic choice off: drivers/<gpu_driver>/icd.json names its library there, the zip's
+# other libraries beside it. Without one (gpu_driver empty or not installed), the bundled Turnip by
+# GPU: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
+# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides that choice.
+gpu_driver=$(setting gpu_driver)
+case $gpu_driver in .*|*/*) gpu_driver= ;; esac
+if [ -n "$gpu_driver" ] && [ -f "$files/drivers/$gpu_driver/icd.json" ]; then
+    icd="$files/drivers/$gpu_driver/icd.json"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$files/drivers/$gpu_driver"
+    echo "GPU driver: $gpu_driver (installed from a zip, automatic choice off)"
+else
+    [ -n "$gpu_driver" ] && echo "GPU driver $gpu_driver is not installed: automatic choice"
+    turnip=${BB_TURNIP:-}
+    if [ -z "$turnip" ]; then
+        case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
+            0x44*) turnip=gen8 ;;
+            *) turnip=main ;;
+        esac
+    fi
+    icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+    [ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
+        icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
+    echo "Turnip: ${icd##*/}"
+fi
+export VK_DRIVER_FILES="$icd"
+export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 if [ "${BB_ANDROID_INPUT:-0}" = 1 ]; then
     export BB_PAD_FILE="$base/android-pad.state" BB_PAD_QUIET=1
     # Text the game asks for (the character name): the app's touch keyboard.
@@ -43,7 +56,6 @@ if [ "${BB_ANDROID_INPUT:-0}" = 1 ]; then
 fi
 # Graphics settings (the app's settings screen writes bbport.ini). The output is the Thor's
 # 1280x720 display; the preset sets the scene size, FSR 3.1 upscales it to the output.
-setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
 upscaler=$(setting upscaler); preset=$(setting preset)
 # FSR 4 and 4.1.1 (INT8 models) are not offered: on the Thor's Adreno 740 FSR 4 took ~3 min to
 # compile in Turnip, then ran at 2.4 FPS (~470 ms of GPU time a frame) with a black scene, and with
@@ -63,6 +75,10 @@ export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # changes, undone in 0.5.1) and is not tested here on its own. BB_INDIRECT_GUARD=1 in
 # thor-local.sh turns it on.
 export BB_INDIRECT_GUARD=${BB_INDIRECT_GUARD:-0}
+# The two-stage draw pipeline (bb:DrawRec) turns itself on only with 8 or more CPUs the game may
+# use, so thor_cpus=3-7 turned it off. On, it frees the GPU command thread: 31 -> 34 FPS on the
+# Thor with all cores. BB_DRAW_PIPE=0 in thor-local.sh turns it off.
+export BB_DRAW_PIPE=${BB_DRAW_PIPE:-1}
 # Lossless Scaling frame generation (lsfg_multiplier 2-4): the lsfg-vk 1.0 layer with our Turnip
 # patches (bbport/arm64/lsfg, build_lsfg.sh) and Lossless.dll from the player's own Lossless
 # Scaling (Steam), next to the game folder or in bbport/. It replaces FSR 3.1 frame generation.
@@ -184,6 +200,27 @@ case ${1:-game} in
             echo 'Python runtime missing; cannot prepare the selected game files' >&2
             exit 2
         fi
+        # Loose-file mods (mods_enabled, default on): a symlink overlay of the game folder, built
+        # after prepare_game.py (it needs the original eboot). mods_android.py prints the folder to
+        # run (the overlay, or the game itself when no valid enabled mod); it never fails the launch.
+        mods_dir=$(setting mods_dir)
+        [ -n "$mods_dir" ] || mods_dir=/storage/emulated/0/Bloodborne/mods
+        export BB_MODS_DIR="$mods_dir"
+        [ -n "${BB_MOD_TRACE:-}" ] && export BB_MOD_TRACE
+        app0_dir=$game_dir
+        if [ "$(setting mods_enabled)" != 0 ] && [ -x "$host/usr/bin/python3.13" ]; then
+            mods_game=$(PYTHONHOME="$host/usr" "$host/usr/bin/python3.13" "$base/scripts/mods_android.py" apply \
+                --game "$game_dir" --out "$base/mod-game" --mods-dir "$mods_dir" \
+                --config "$base/mods.json" | tail -n 1) || mods_game=
+            if [ -n "$mods_game" ] && [ -f "$mods_game/eboot.bin" ]; then
+                app0_dir=$mods_game
+            else
+                echo 'Mods: could not be set up, starting without them'
+            fi
+        else
+            echo 'Mods: off'
+        fi
+        [ "$app0_dir" = "$game_dir" ] && rm -rf "$base/mod-game"
         # The native ARM64 build (runtime and GPU native, the game's code in FEXCore) when it is
         # installed; BB_THOR_X86=1: the whole x86-64 loader under FEX instead.
         if [ -x "$base/arm64/bin/bb-probe" ] && [ "${BB_THOR_X86:-0}" != 1 ]; then
@@ -221,7 +258,7 @@ case ${1:-game} in
         fi
         exec "$@" \
             --content-profile "$base/data/content.bin" \
-            --app0 "$game_dir" --user "$base/user" --timeout "${BB_TIMEOUT:-0}"
+            --app0 "$app0_dir" --user "$base/user" --timeout "${BB_TIMEOUT:-0}"
         ;;
     *) echo 'usage: run-thor.sh cpu|vulkan|renderer|window|gamepads|controller|game' >&2; exit 2 ;;
 esac

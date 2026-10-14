@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <boost/container/small_vector.hpp>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -473,6 +474,18 @@ private:
         bool is_written;
     };
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    /// bbport: buffer ranges the draw being recorded reads or writes besides bound_buffers (vertex
+    /// streams, indirect arguments, special buffers), and whether it reaches memory by device
+    /// address: handed to the scheduler once the draw is recorded (ResetBindings), for copy
+    /// hoisting (Scheduler::TryHoist). Noting them earlier would stop the draw's own uploads.
+    struct HoistNote {
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+        u64 size;
+        bool is_written;
+    };
+    boost::container::small_vector<HoistNote, 16> hoist_notes;
+    bool draw_global_access{};
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

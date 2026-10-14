@@ -1,0 +1,17 @@
+name: Feature request
+description: An idea for the app or the port.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like
+      description: What it should do, and why it would help you.
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Your device
+      description: Helps when the idea is about a device, a controller or performance.
+      placeholder: AYN Thor, Snapdragon 8 Gen 2

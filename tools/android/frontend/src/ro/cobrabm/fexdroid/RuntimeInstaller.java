@@ -46,7 +46,8 @@ final class RuntimeInstaller {
         return out.toString();
     }
 
-    static void ensure(Context context, File files, Consumer<String> status) throws Exception {
+    /** Synchronized: the game's start and the PKG/mod installers (before their first script) both call it. */
+    static synchronized void ensure(Context context, File files, Consumer<String> status) throws Exception {
         String expected;
         try (InputStream in = context.getAssets().open("runtime.sha256")) {
             expected = new String(readAll(in), StandardCharsets.US_ASCII).trim();

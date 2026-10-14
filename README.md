@@ -20,14 +20,38 @@
 
 Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and renderer run natively on ARM64, FEXCore translates the game's x86-64 code, and Mesa Turnip drives the GPU. Experimental.
 
+## How it works
+
+This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs in an Android app process, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
+
+**Translated while the game runs:**
+
+| What | From | To | By |
+|---|---|---|---|
+| The game's CPU code (`eboot.bin`) | x86-64 (AVX, BMI) | ARM64 | [FEXCore](https://github.com/FEX-Emu/FEX), built into the game process as a library: only the game's code goes through it, no x86 Linux, Wine or Box64 |
+| GPU commands the game writes itself (it links libGnm statically) | AMD GCN command buffers (PM4) | Vulkan commands | the renderer |
+| Shaders | AMD GCN | SPIR-V | the renderer's shader recompiler |
+
+**Native ARM64 code, no translation:**
+
+- **Runtime**: replaces the PS4 system libraries the game imports: threads, mutexes, semaphores, memory, time, files, save data, controller input, audio with ATRAC9 decoding, video output, movie playback. A call from the game goes straight to this code.
+- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1, Lossless Scaling frame generation.
+- **Vulkan driver**: Mesa Turnip, shipped in the APK.
+- **The Android app**: menu, on-screen controller, Steam sign-in.
+
+FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 precision). The PC build has no translation layer at all: there, the game's x86-64 code runs directly on the CPU.
+
 ## Features
 
-- **Cheats** — new in 0.5.0: infinite health and infinite blood vials/items, switched on and off while you play
+- **Faster rendering** — new in 0.8.0: about 30 → 34–35 FPS on the AYN Thor in Central Yharnam, with steadier frame times
+- **Updates from the app** — new in 0.8.0: menu → **Check for updates** downloads and installs the newest release
+- **Mods**: install .zip, .7z or PS4 .pkg mods for 1.09, switch them on and off and set their load order
+- **Cheats**: infinite health and infinite blood vials/items, switched on and off while you play
 - **Game settings** in the app's menu: skip the online/offline screen (straight to the main menu), skip intros, free camera, debug menu
 - **Lossless Scaling frame generation** (2×, 3×, 4×). Sign in with Steam in the app and it downloads `Lossless.dll` from your own copy of Lossless Scaling
 - **FSR 3.1** upscaling and **FSR 3.1 frame generation**. FSR 3.1 frame generation has poor image quality for now; try Lossless Scaling frame generation instead
 - **On-screen PlayStation controller** with an editable layout; physical controllers work too
-- **Two Vulkan drivers in one APK**, picked automatically for your GPU
+- **Two Vulkan drivers in one APK**, picked automatically for your GPU; newer Turnip builds download from the **GPU driver** menu
 - 16:9 picture on any screen, including foldables
 
 ## Devices
@@ -57,7 +81,7 @@ Every retail release runs the same 1.09 executable, so all of them work:
 
 Use the original 1.09 `eboot.bin`. Some dumps ship one with a 60 fps patch already applied; that one crashes in the gestures menu.
 
-The APK contains no game files. Updates keep settings and saves.
+The APK contains no game files. Updates keep saves, and settings too, except once: updating from 0.7.x or older to 0.8.0 sets the new [default settings](#default-settings-and-performance). Later releases install from the menu (**Check for updates**); Android asks once to allow the app to install apps.
 
 On ColorOS / OxygenOS (Oppo, OnePlus) a "Security warning" about a malicious app may appear at launch. Tap **Got it**; the game keeps running. ColorOS shows it for any app that runs Linux programs, such as Termux and Winlator.
 
@@ -65,12 +89,19 @@ On ColorOS / OxygenOS (Oppo, OnePlus) a "Security warning" about a malicious app
 
 Swipe in from the left edge (or press Back) to open the menu. Its sections:
 
-- **Game:** resume, Game settings, Cheats, restart.
-- **Graphics:** graphics settings (upscaler, render size, FPS limit, effects) and Lossless Scaling.
-- **Controls:** turn the on-screen controller on or off, edit its layout, reset it.
+- **Game:** resume, Game settings, Cheats, Mods, restart.
+- **Graphics:** graphics settings (upscaler, render size, FPS limit, model detail, effects), Lossless Scaling and the GPU driver.
+- **Controls:** turn the on-screen controller on or off; edit its layout (move, resize or reset the buttons). With the controller on, drag anywhere outside the buttons to turn the camera.
 - **Storage:** choose the game folder, quit.
+- **App:** check for updates (installing one closes the game, so save first).
 
 Each entry shows its current setting underneath.
+
+## Default settings and performance
+
+The defaults are tuned on the AYN Thor: a 752×424 scene upscaled by FSR 3.1 to 1280×720, the costly effects (SSAO, SSR, dynamic shadows, depth of field, motion blur, the game's anti-aliasing) off, **lowest model detail** and a 60 FPS limit. Lossless Scaling and cheats start off. They apply on a first install and once when updating from 0.7.x or older; your controller mapping, GPU driver and mods choice are kept.
+
+On the Thor most of the GPU's time goes to geometry, not pixels: a smaller render size barely changes the frame rate, the model detail setting does (lowest: about +10%). Lossless Scaling 2× costs little GPU time and doubles the frames shown.
 
 ## Game settings and cheats
 

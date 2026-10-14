@@ -24,3 +24,12 @@ pinned in the script): Mesa main of 2026-09-18 plus Adreno 8xx work (A8xx family
 Mesa commits first: b889ab52, b7ad24ad, e984ef29 (the zero-timeout fix) and 6cb65e61. Then the
 fexdroid patches above. `run-thor.sh` loads it when `kgsl-chip-id` reports an Adreno 8xx
 (`0x44…`, e.g. the Snapdragon 8 Elite's 830); `BB_TURNIP=main|gen8` overrides that.
+
+## Adreno 8xx, V37 recipe variant (`build_turnip.sh gen8v37`)
+
+Upstream Mesa main (pinned in the script) plus StevenMXZ's V37 A8xx recipe (`v37/`, GPL-3.0, see
+`v37/SOURCE.md` for the origin, the apply order and what Mesa main made redundant or needed
+rebasing) plus `0005`–`0009` above. `v37/ours/` holds our rebased copies of patches the recipe
+moved out from under. Output `out/arm64/turnip-gen8v37`; not part of the runtime bundle,
+`release_turnip.py gen8v37` packages it as a driver zip (the `patches-*.tar.gz` carries the
+recipe files and the GPL-3.0 text with it).

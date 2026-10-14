@@ -82,6 +82,11 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        // bbport: stage B does not go idle with signals held back by a hoist window
+        // (Scheduler::ReleaseHeldSignals): the guest may be waiting for them.
+        draw_pipe->SetIdleHook([](void* scheduler) {
+            static_cast<Scheduler*>(scheduler)->ReleaseHeldSignals();
+        }, &scheduler);
     }
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -345,6 +350,9 @@ bool Rasterizer::WriteLabelOnGpu(VAddr address, u64 value, u32 num_bytes) {
         runtime.AccessBuffer(target->first, target->second, num_bytes,
                              vk::PipelineStageFlagBits2::eTransfer,
                              vk::AccessFlagBits2::eTransferWrite);
+    } else {
+        // Written inside the render pass: a copy over it must stay behind it.
+        scheduler.NoteDrawBuffer(target->first, target->second, num_bytes, true);
     }
     // A VRAM copy of these bytes gets them too, at its next binding (as for CPU-written labels).
     buffer_cache.NoteLateCommandWrite(address, &value, num_bytes);
@@ -1881,12 +1889,14 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     const auto [buffer, base] =
         buffer_cache.ObtainBuffer(indirect.args, stride * max_count, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, stride * max_count);
+    hoist_notes.push_back({buffer, base, u64(stride) * max_count, false});
 
     const VideoCore::Buffer* count_buffer;
     u64 count_offset;
     if (count_address != 0) {
         std::tie(count_buffer, count_offset) = buffer_cache.ObtainBuffer(count_address, 4, false);
         needs_barrier |= runtime.IsBufferAccessed(count_buffer, count_offset, 4);
+        hoist_notes.push_back({count_buffer, count_offset, 4, false});
     }
 
     if (needs_barrier) {
@@ -2506,6 +2516,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     if (uses_dma) {
         buffer_cache.SynchronizeDmaBuffers();
         fault_process_pending = true;
+        draw_global_access = true; // bbport: reaches memory by address (copy hoisting)
     }
 
     return true;
@@ -2684,6 +2695,7 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         std::tie(range.buffer, range.offset) =
             buffer_cache.ObtainBuffer(range.base_address, size, false);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        hoist_notes.push_back({range.buffer, range.offset, size, false});
     }
 
     // Bind vertex buffers
@@ -2753,6 +2765,24 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
+    // bbport: what this draw read and wrote, for the copies hoisted in front of its pass.
+    if (scheduler.HoistWindowOpen()) {
+        for (const auto [buffer, offset, size, is_written] : bound_buffers) {
+            if (buffer) {
+                scheduler.NoteDrawBuffer(buffer, offset, size, is_written);
+            } else {
+                scheduler.NoteDrawGlobal(is_written);
+            }
+        }
+        for (const auto& note : hoist_notes) {
+            scheduler.NoteDrawBuffer(note.buffer, note.offset, note.size, note.is_written);
+        }
+        if (draw_global_access) {
+            scheduler.NoteDrawGlobal(true);
+        }
+    }
+    hoist_notes.clear();
+    draw_global_access = false;
     for (const auto [buffer, offset, size, is_written] : bound_buffers) {
         const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
                                           : vk::PipelineStageFlagBits2::eAllGraphics;
@@ -3026,6 +3056,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
                 buffer_infos.emplace_back(gds_buf->Handle(), 0, gds_buf->SizeBytes());
                 needs_barrier |= runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes());
+                hoist_notes.push_back({gds_buf, 0, gds_buf->SizeBytes(), true});
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
                 const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
@@ -3058,9 +3089,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             } else if (desc.buffer_type == Shader::BufferType::BdaPagetable) {
                 const auto* bda_buffer = buffer_cache.GetBdaPageTableBuffer();
                 buffer_infos.emplace_back(bda_buffer->Handle(), 0, bda_buffer->SizeBytes());
+                hoist_notes.push_back({bda_buffer, 0, bda_buffer->SizeBytes(), false});
             } else if (desc.buffer_type == Shader::BufferType::FaultBuffer) {
                 const auto* fault_buffer = buffer_cache.GetFaultBuffer();
                 buffer_infos.emplace_back(fault_buffer->Handle(), 0, fault_buffer->SizeBytes());
+                hoist_notes.push_back({fault_buffer, 0, fault_buffer->SizeBytes(), true});
             } else if (desc.buffer_type == Shader::BufferType::SharedMemory) {
                 auto& lds_buffer = buffer_cache.GetStreamBuffer();
                 const auto& cs_program = CsRegs();

@@ -895,6 +895,88 @@ public:
     /// command) a long enough segment is cut there, and the next one goes to another thread.
     void KickRecording(bool force = false);
 
+    // ---- bbport: copy hoisting (BB_HOIST_COPIES=0: off) --------------------------------------
+    // A buffer copy issued inside a render pass ends it, and on a tiler that stores and reloads
+    // every attachment (the G-buffer pass was cut ~47 times a frame by copy shaders and uploads
+    // between its draws). While a pass is open under deferred recording (a "hoist window") such a
+    // copy is recorded in front of the pass instead, when it cannot conflict with the draws
+    // already in it: the draws' buffer ranges are noted (NoteDrawBuffer, NoteDrawGlobal) and
+    // TryHoist checks the copy against them. Hoisted commands go into a prepass chunk, which
+    // CloseHoistWindow splices in before the pass's first chunk. Until then the pass's chunks are
+    // not handed to the recording threads (KickRecording without `force`); every wait on the
+    // recording threads goes through HandOver, which closes the window first.
+    struct HoistAccess {
+        const void* buffer; ///< the VideoCore::Buffer
+        u64 start;
+        u64 end; ///< exclusive
+    };
+
+    /// Whether commands of draws recorded now are noted (a window is open).
+    [[nodiscard]] bool HoistWindowOpen() const noexcept {
+        return hoist_open;
+    }
+
+    /// bbport: SignalAfterHostCopies does not force a hand-over while a hoist window is open
+    /// (BB_HOIST_HOLD_SIGNALS, default on): the signal waits in the held-back ordered chunk. The
+    /// guest may be polling for it, so whoever records must not go idle while one is held:
+    /// the draw pipe's recording thread calls this when its queue runs dry, KickRecording
+    /// releases them when the window is gone or they are older than BB_HOIST_HOLD_US, and every
+    /// HandOver releases them. Producer thread only.
+    void ReleaseHeldSignals();
+    [[nodiscard]] bool HasHeldSignals() const noexcept {
+        return held_signals;
+    }
+
+    /// The draw just recorded read (or wrote) [offset, offset + size) of `buffer`.
+    void NoteDrawBuffer(const void* buffer, u64 offset, u64 size, bool write) {
+        if (hoist_open && size != 0) {
+            NoteDrawRange(buffer, offset, offset + size, write);
+        }
+    }
+
+    /// The draw just recorded reached memory the ranges do not describe (the game's memory
+    /// through the page table or device addresses): nothing is hoisted in this pass any more.
+    void NoteDrawGlobal(bool write) {
+        if (hoist_open) {
+            pass_global_read = true;
+            pass_global_write |= write;
+        }
+    }
+
+    /// Tries to take a command that reads `reads` and writes `writes` out of the pass: true when
+    /// the caller should record it with RecordHoisted()/RecordHoistedData() instead of ending
+    /// the pass. False: nothing was done; the caller ends the pass as before (which closes the
+    /// window, so nothing recorded later can move in front of what is recorded now).
+    bool TryHoist(std::span<const HoistAccess> reads, std::span<const HoistAccess> writes);
+
+    /// Records `func(vk::CommandBuffer)` into the prepass (after a successful TryHoist).
+    template <typename Func>
+    void RecordHoisted(Func&& func) {
+        ProducerScope producer{*this, "RecordHoisted"};
+        if (!PrepassChunk().Push(std::forward<Func>(func))) {
+            RetirePrepassChunk();
+            const bool pushed = PrepassChunk().Push(std::forward<Func>(func));
+            ASSERT(pushed);
+        }
+    }
+
+    /// RecordData() for a hoisted command: the data lives in the prepass chunk the command uses.
+    template <typename T>
+    std::span<const T> RecordHoistedData(std::span<const T> data) {
+        ProducerScope producer{*this, "RecordHoistedData"};
+        if (data.empty()) {
+            return data;
+        }
+        const size_t bytes = data.size_bytes() + alignof(T);
+        ASSERT(bytes + 1024 <= RecordChunk::Capacity);
+        if (RecordChunk::Capacity - PrepassChunk().Size() < bytes + 1024) {
+            RetirePrepassChunk();
+        }
+        auto* dst = static_cast<T*>(PrepassChunk().Allocate(data.size_bytes(), alignof(T)));
+        std::memcpy(dst, data.data(), data.size_bytes());
+        return {dst, data.size()};
+    }
+
     /// bbport: work that may not span command buffers or render pass instances (an occlusion
     /// query, vk_occlusion.h). While one is set, Suspend is called before every boundary (a
     /// render pass beginning or ending, a segment cut, a direct segment, a submission) and Resume
@@ -1045,6 +1127,57 @@ private:
         }
     }
 
+    // ---- bbport: copy hoisting (see TryHoist) ----
+    /// A set of buffer ranges: disjoint ranges ordered by buffer and start, plus the newest ones
+    /// in an unordered tail that is merged in when it grows (a pass notes thousands).
+    class HoistRanges {
+    public:
+        static constexpr size_t MaxRanges = 1 << 16;
+        void Clear() {
+            merged.clear();
+            tail.clear();
+        }
+        [[nodiscard]] size_t Size() const noexcept {
+            return merged.size() + tail.size();
+        }
+        [[nodiscard]] bool Overlaps(const void* buffer, u64 start, u64 end) const noexcept;
+        /// False when there are too many separate ranges to keep (the caller gives up).
+        bool Add(const void* buffer, u64 start, u64 end);
+
+    private:
+        struct Range {
+            const void* buffer;
+            u64 start;
+            u64 end;
+        };
+        static bool Before(const Range& a, const Range& b) noexcept {
+            return a.buffer != b.buffer ? std::less<const void*>{}(a.buffer, b.buffer)
+                                        : a.start < b.start;
+        }
+        void MergeTail();
+        std::vector<Range> merged;
+        std::vector<Range> tail;
+    };
+
+    void NoteDrawRange(const void* buffer, u64 start, u64 end, bool write);
+    void OpenHoistWindow();
+    /// Splices the prepass in front of the pass's first chunk and ends the window. Called by
+    /// EndRendering and at the start of HandOver.
+    void CloseHoistWindow();
+    RecordChunk& PrepassChunk() {
+        if (!prepass_chunk) [[unlikely]] {
+            prepass_chunk = AcquireChunk();
+        }
+        return *prepass_chunk;
+    }
+    void RetirePrepassChunk() {
+        auto full = AcquireChunk();
+        prepass_chunk.swap(full);
+        if (full) {
+            prepass_full.push_back(std::move(full));
+        }
+    }
+
     /// The current chunks, never null: replacements are swapped in, so a fault handler that
     /// records on this thread while one is replaced still finds one; a null one (a build without
     /// that, issue #100: a read of RecordChunk::Capacity at address 0x20000) is replaced here.
@@ -1179,6 +1312,22 @@ private:
     /// with the segments before it.
     bool direct_segment = false;
     CarriedScope* carried_scope = nullptr;
+    // bbport: copy hoisting. The window is open from BeginRendering until EndRendering or the next
+    // HandOver; guarded by the recording side's single producer.
+    bool hoist_open = false;
+    size_t hoist_split = 0; ///< full_chunks.size() when the window opened: the pass starts here
+    bool held_signals = false; ///< an ordered signal waits for the chunks held back (see above)
+    std::chrono::steady_clock::time_point held_since;
+    enum class HoistClose : u8 { Normal, IdleValve, TimeCap };
+    HoistClose hoist_close_reason = HoistClose::Normal; ///< for the statistics of the next close
+    size_t hoist_bytes0 = 0; ///< segment_bytes then: the pass's chunks held back are counted from it
+    std::unique_ptr<RecordChunk> prepass_chunk;
+    std::vector<std::unique_ptr<RecordChunk>> prepass_full;
+    bool prepass_started = false; ///< the opening barrier is recorded
+    HoistRanges pass_reads, pass_writes;       ///< what the draws of the pass read / wrote
+    bool pass_global_read = false, pass_global_write = false;
+    bool pass_overflow = false;                ///< too many ranges: nothing more is hoisted
+    HoistRanges prepass_reads, prepass_writes; ///< what the hoisted commands read / wrote
     void CarrySuspend(bool inside_render_pass) {
         if (carried_scope) {
             carried_scope->Suspend(inside_render_pass);

@@ -47,6 +47,16 @@ public:
         wake.notify_one();
     }
 
+    /// bbport: called on stage B after it ran a packet and found the ring empty, before it
+    /// publishes the packet as consumed (stage A may use the scheduler right after that): the
+    /// last point where stage B may release what it holds back while it has no more work
+    /// (Scheduler::ReleaseHeldSignals).
+    using IdleHook = void (*)(void* context);
+    void SetIdleHook(IdleHook hook, void* hook_context) {
+        idle_context = hook_context;
+        idle_hook.store(hook, std::memory_order_release);
+    }
+
     /// True on the draw recording thread.
     [[nodiscard]] static bool OnStageB() noexcept {
         return on_stage_b;
@@ -241,6 +251,10 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(BbCpu::Cycles() - start, std::memory_order_relaxed);
             at += header->size;
+            if (const IdleHook hook = idle_hook.load(std::memory_order_acquire);
+                hook && published.load(std::memory_order_acquire) == at) {
+                hook(idle_context);
+            }
             consumed_packets.fetch_add(1, std::memory_order_release);
             consumed.store(at, std::memory_order_release);
         }
@@ -258,6 +272,8 @@ private:
     alignas(64) std::atomic<u32> wake{0};
     std::atomic<bool> sleeping{false};
     std::atomic<u32> stage_b_tid{0};
+    std::atomic<IdleHook> idle_hook{nullptr};
+    void* idle_context = nullptr;
     std::jthread thread;
 };
 
