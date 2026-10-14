@@ -44,7 +44,7 @@ public final class MainActivity extends Activity {
     private String FILES, ROOT, BASE;
     /** The game (e.g. CUSA03173, with eboot.bin) in shared storage, chosen by the player. */
     private String gameDir;
-    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3; // 4-6: ModsDialog, 7-8: GameInstaller
+    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3, REQUEST_SAVES=9; // 4-6: ModsDialog, 7-8: GameInstaller
     private SurfaceHolder pendingHolder;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
@@ -240,6 +240,8 @@ public final class MainActivity extends Activity {
 
         section("Storage");
         folderItem=menuItem("ic_folder","Game folder","",() -> { closeDrawer(); askGameFolder(true); });
+        menuItem("ic_download","Back up saves","Copy them to the Download folder",() -> { closeDrawer(); backupSaves(); });
+        menuItem("ic_restore","Restore saves","From a backup folder",() -> { closeDrawer(); askRestoreSaves(); });
         menuItem("ic_exit","Quit game",null,() -> new AlertDialog.Builder(this)
             .setTitle("Quit Bloodborne?").setMessage("Any unsaved progress will be lost.")
             .setNegativeButton("Cancel",null).setPositiveButton("Quit",(dialog,which) -> finish()).show());
@@ -589,6 +591,11 @@ public final class MainActivity extends Activity {
             return;
         }
         if (code==ModsDialog.REQUEST_FOLDER || code==ModsDialog.REQUEST_ARCHIVE) { mods.onResult(code,result,data); return; }
+        if (code==REQUEST_SAVES) {
+            if (result==RESULT_OK && data!=null && data.getData()!=null) restoreSaves(folderOf(data.getData()));
+            else immersive();
+            return;
+        }
         if (code==GameInstaller.REQUEST_PKG || code==GameInstaller.REQUEST_DEST) { installer.onResult(code,result,data); return; }
         if (code!=REQUEST_FOLDER) return;
         if (result!=RESULT_OK || data==null || data.getData()==null) { if (!hasGame()) askGameFolder(false); return; }
@@ -606,6 +613,85 @@ public final class MainActivity extends Activity {
         getSharedPreferences("bloodborne",MODE_PRIVATE).edit().putString("game_dir",gameDir).apply();
         status.setText("Starting Bloodborne…");
         if (changed && game!=null) restartGame(); else startPending();
+    }
+    // ---- Save data backup and restore (SaveBackup) ----
+    private File savesDir() { return SaveBackup.saves(new File(BASE)); }
+    private boolean gameRunning() { Process p=game; return p!=null && p.isAlive(); }
+    private boolean saveStorage() {
+        if (Build.VERSION.SDK_INT<23 || checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                ==android.content.pm.PackageManager.PERMISSION_GRANTED) return true;
+        toast("Allow storage access first (it is asked when the game starts)."); return false;
+    }
+    private static final String STOP_NOTE="\n\nThe game is stopped for this and starts again afterwards; unsaved progress is lost.";
+    private void backupSaves() {
+        if (!saveStorage()) return;
+        if (!SaveBackup.hasSaves(savesDir())) {
+            new AlertDialog.Builder(this).setTitle("No saves yet").setMessage("There is no save data to back up. Play and save in the game first.")
+                .setPositiveButton("OK",null).setOnDismissListener(d -> immersive()).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Back up saves?")
+            .setMessage("Copies your saves to a new Bloodborne-saves-… folder in your Download folder.")
+            .setNegativeButton("Cancel",null)
+            .setPositiveButton("Back up",(d,w) -> saveJob("Backing up saves…","Backup failed",false,() -> {
+                File dest=SaveBackup.backup(savesDir(),downloads(),new java.util.Date());
+                return "Saves copied to\n"+dest.getPath();
+            })).setOnDismissListener(d -> immersive()).show();
+    }
+    private File downloads() { return android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS); }
+    private void askRestoreSaves() {
+        if (!saveStorage()) return;
+        new AlertDialog.Builder(this).setTitle("Restore saves")
+            .setMessage("Choose a backup folder (Bloodborne-saves-… in Download) or a savedata folder. It replaces your current saves; "
+                +"those are backed up to Download first.")
+            .setNegativeButton("Cancel",null)
+            .setPositiveButton("Choose folder",(d,w) -> {
+                try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),REQUEST_SAVES); }
+                catch (Exception ex) { toast("No folder picker: "+ex); }
+            }).setOnDismissListener(d -> immersive()).show();
+    }
+    private void restoreSaves(File picked) {
+        File source=SaveBackup.find(picked);
+        if (source==null) {
+            new AlertDialog.Builder(this).setTitle("Not a saves folder")
+                .setMessage((picked==null ? "That location" : picked.getPath())+" has no save data (expected a savedata folder, "
+                    +"or a folder with one, holding user id / title id folders such as 1000/CUSA03173).")
+                .setPositiveButton("OK",null).setOnDismissListener(d -> immersive()).show();
+            return;
+        }
+        try { if (source.getCanonicalFile().equals(savesDir().getCanonicalFile())) { toast("That is the current save data."); immersive(); return; } }
+        catch (java.io.IOException ignored) {}
+        new AlertDialog.Builder(this).setTitle("Replace your saves?")
+            .setMessage("This replaces your current saves with those in\n"+source.getPath()+"\n\nYour current saves are backed up to the "
+                +"Download folder first."+(gameRunning() ? STOP_NOTE : ""))
+            .setNegativeButton("Cancel",null)
+            .setPositiveButton("Restore",(d,w) -> saveJob("Restoring saves…","Restore failed",true,() -> {
+                String note="";
+                if (SaveBackup.hasSaves(savesDir()))
+                    note="\n\nYour previous saves are in\n"+SaveBackup.backup(savesDir(),downloads(),new java.util.Date()).getPath();
+                SaveBackup.restore(savesDir(),source);
+                return "Saves restored."+note;
+            })).setOnDismissListener(d -> immersive()).show();
+    }
+    /** Runs a save data copy off the UI thread, then shows the result. With stop, the game (which writes the saves)
+     *  is stopped for the copy and started again afterwards. */
+    private void saveJob(String progress,String failure,boolean stop,java.util.concurrent.Callable<String> job) {
+        boolean wasRunning=stop && gameRunning();
+        AlertDialog busy=new AlertDialog.Builder(this).setTitle(progress).setMessage("Please wait.").setCancelable(false).show();
+        worker.execute(() -> {
+            if (wasRunning) stopGame();
+            String message; boolean ok=true;
+            try { message=job.call(); }
+            catch (Exception ex) { ok=false; message=ex.getMessage()==null ? ex.toString() : ex.getMessage(); android.util.Log.e("Bloodborne","saves: "+ex); }
+            String text=message; boolean success=ok;
+            main.post(() -> {
+                busy.dismiss();
+                if (destroyed) return;
+                new AlertDialog.Builder(this).setTitle(success ? "Done" : failure).setMessage(text)
+                    .setPositiveButton("OK",null).setOnDismissListener(d -> immersive()).show();
+                if (wasRunning && shmid>=0) restartGame();
+            });
+        });
     }
     /** The game was installed from PKGs: the same as choosing its folder, and the game starts (again). */
     private void useInstalledGame(File dir) {
