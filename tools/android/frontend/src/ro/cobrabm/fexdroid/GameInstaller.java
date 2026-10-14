@@ -16,9 +16,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.json.JSONObject;
 
 /** Installs the game from its PKG files (the runtime's install-game, one PKG per run): the base game
- *  first, then the 1.09 update into the same destination. Picks the PKG (a real path: multi-GB files
- *  are never copied), asks where to install, runs the tool under a progress dialog (bytes, rate, time
- *  left; Cancel destroys the process) and reports the result. When the game folder is ready the
+ *  first, then the 1.09 update into the same destination. Picks the PKG (a real path: multi-GB files are
+ *  never copied), then asks where to install it (the tool makes the CUSAxxxxx folder inside), runs the tool
+ *  under a progress dialog (bytes, rate, time left; Cancel destroys the process) and reports the result. When the game folder is ready the
  *  activity starts it. */
 final class GameInstaller {
     /** The runtime tool's script (bbport/): install-game may move to its own script, change it here. */
@@ -47,7 +47,7 @@ final class GameInstaller {
     private volatile boolean closed=true;
     private PkgProgressDialog progress;
     private String dest=DEFAULT_DEST;
-    private File pending; private boolean pendingTemp, destChosen, stopped, busy;
+    private File pending; private String pendingName=""; private boolean pendingTemp, destChosen, stopped, busy;
 
     GameInstaller(Activity activity,Host host) { this.activity=activity; this.host=host; }
 
@@ -61,22 +61,24 @@ final class GameInstaller {
         b.show();
     }
 
-    /** Explains, then starts with the first PKG. */
+    /** Picks the PKG; where to install it is asked next. */
     void start() {
         if (busy) return;
         closed=false; cancel.set(false); dest=DEFAULT_DEST; destChosen=false; stopped=false; pending=null;
         if (!host.hasStorage()) { host.toast("Installing needs storage access."); end(); return; }
-        new AlertDialog.Builder(activity).setTitle("Install from PKG")
-            .setMessage("Pick the game's PKG. Bloodborne needs update 1.09: if your PKG is the base game, you'll pick the "
-                +"update PKG next. You need free space about the size of the PKG.")
-            .setCancelable(false).setNegativeButton("Cancel",(d,w) -> end())
-            .setPositiveButton("Pick PKG…",(d,w) -> pickPkg()).show();
+        pickPkg();
     }
+    /** The install flow is open (from start() until it ends). */
+    boolean active() { return !closed; }
     void close() {
         closed=true; cancel.set(true);
         if (progress!=null) progress.dismiss();
     }
 
+    private void pickDest() {
+        try { host.pick(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),REQUEST_DEST); }
+        catch (Exception ex) { host.toast("No folder picker: "+ex); discard(); end(); }
+    }
     private void pickPkg() {
         try { host.pick(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"),REQUEST_PKG); }
         catch (Exception ex) { host.toast("No file picker: "+ex); end(); }
@@ -88,18 +90,18 @@ final class GameInstaller {
         boolean ok=result==Activity.RESULT_OK && data!=null && data.getData()!=null;
         if (code==REQUEST_PKG) { if (ok) resolve(data.getData()); else end(); }
         else if (code==REQUEST_DEST) {
-            if (ok) {
-                File dir=host.folderOf(data.getData());
-                if (dir==null) host.toast("That folder cannot be used."); else dest=dir.getPath();
-            }
-            askDestination();
+            if (!ok) { askDestination(); return; }
+            File dir=host.folderOf(data.getData());
+            if (dir==null) { host.toast("That folder cannot be used: choose one in the phone's storage or on the SD card."); askDestination(); return; }
+            dest=dir.getPath(); destChosen=true;
+            confirmStop();
         }
     }
 
     /** The PKG as a readable file: its own path, or a copy in the cache when it is small. */
     private void resolve(Uri uri) {
         File own=host.pathOf(uri);
-        if (own!=null && own.isFile() && own.canRead()) { picked(own,false); return; }
+        if (own!=null && own.isFile() && own.canRead()) { picked(own,false,own.getName()); return; }
         String name="game.pkg"; long size=-1;
         try (android.database.Cursor c=activity.getContentResolver().query(uri,
                 new String[]{android.provider.OpenableColumns.DISPLAY_NAME,android.provider.OpenableColumns.SIZE},null,null,null)) {
@@ -139,30 +141,28 @@ final class GameInstaller {
                 if (!live()) { if (copy!=null) copy.delete(); return; }
                 if (stop) { if (copy!=null) copy.delete(); end(); }
                 else if (problem!=null) alert("Could not read the PKG",problem,false);
-                else picked(copy,true);
+                else picked(copy,true,label);
             });
         },"Game-copy");
     }
 
-    private void picked(File pkg,boolean temporary) {
+    private void picked(File pkg,boolean temporary,String name) {
         if (!"pkg".equals(ModArchive.kind(pkg))) {
             if (temporary) pkg.delete();
             alert("Not a PKG","That file is not a PS4 .pkg package.",true); return;
         }
         pending=pkg; pendingTemp=temporary;
-        if (destChosen) run(); else askDestination();
+        if (destChosen) confirmStop(); else { pendingName=name; askDestination(); }
     }
 
+    /** The PKG is picked: where to install it (the update goes where the base game went, without asking). */
     private void askDestination() {
         if (pending==null) { end(); return; }
-        new AlertDialog.Builder(activity).setTitle("Install to").setCancelable(false)
-            .setMessage("The game folder is created inside:\n"+dest+"\n\nKeep the base game's and the update's destination the same.")
+        new AlertDialog.Builder(activity).setTitle("Install "+pendingName).setCancelable(false)
+            .setMessage("Choose the folder to install into. A folder named after the game's serial (for example "
+                +"CUSA03173) is created inside it and becomes the game folder.\n\nYou need free space about the size of the PKG.")
             .setNegativeButton("Cancel",(d,w) -> { discard(); end(); })
-            .setNeutralButton("Change…",(d,w) -> {
-                try { host.pick(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),REQUEST_DEST); }
-                catch (Exception ex) { host.toast("No folder picker: "+ex); askDestination(); }
-            })
-            .setPositiveButton("Install",(d,w) -> { destChosen=true; confirmStop(); }).show();
+            .setPositiveButton("Choose folder…",(d,w) -> pickDest()).show();
     }
     private void discard() { if (pending!=null && pendingTemp) pending.delete(); pending=null; }
 
@@ -229,10 +229,14 @@ final class GameInstaller {
         if (o.optBoolean("ready") && !where.isEmpty()) {
             closed=true; host.useGame(new File(where)); return;
         }
-        String what=o.optString("titleId","the game")+(o.isNull("appVer") || o.optString("appVer").isEmpty() ? "" : " "+o.optString("appVer"))+" is installed"
-            +(where.isEmpty() ? "." : " in "+where+".");
-        String next=o.isNull("next") || o.optString("next").isEmpty() ? "The game is not ready yet: install the 1.09 update PKG." : o.optString("next");
-        new AlertDialog.Builder(activity).setTitle("Next: the update").setMessage(what+"\n\n"+next).setCancelable(false)
+        // Not ready: install-game found an older version (the base game, or an update before 1.09).
+        String title=o.isNull("titleId") ? "" : o.optString("titleId");
+        String version=o.isNull("appVer") ? "" : o.optString("appVer").replaceFirst("^0(?=\\d)","");
+        String what="Installed: Bloodborne"+(title.isEmpty() ? "" : " "+title)
+            +", version "+(version.isEmpty() ? "unknown" : version)+(where.isEmpty() ? "" : "\nin "+where)+".";
+        new AlertDialog.Builder(activity).setTitle("Update 1.09 needed")
+            .setMessage(what+"\n\nThe game runs only with version 1.09: install the 1.09 update PKG to play.")
+            .setCancelable(false)
             .setNegativeButton("Later",(d,w) -> end())
             .setPositiveButton("Pick update PKG…",(d,w) -> pickPkg()).show();
     }

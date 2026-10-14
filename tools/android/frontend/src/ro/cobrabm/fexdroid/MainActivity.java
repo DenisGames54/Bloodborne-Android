@@ -133,7 +133,9 @@ public final class MainActivity extends Activity {
         surface.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(SurfaceHolder h) {
                 if (shmid>=0) attach(h);
-                else if (!hasGame()) { pendingHolder=h; askGameFolder(false); }
+                // Returning from the installer's pickers recreates the surface: the installer owns the flow then
+                // (installEnded asks for the folder when it ends without a game).
+                else if (!hasGame()) { pendingHolder=h; if (!installer.active()) askGameFolder(false); }
                 else if (!startingX) { startingX=true; worker.execute(() -> startX(h)); }
             }
             @Override public void surfaceChanged(SurfaceHolder h,int format,int w,int height) {}
