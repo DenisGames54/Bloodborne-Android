@@ -91,7 +91,7 @@ Swipe in from the left edge (or press Back) to open the menu. Its sections:
 
 - **Game:** resume, Game settings, Cheats, Mods, restart.
 - **Graphics:** graphics settings (upscaler, render size, FPS limit, model detail, effects), Lossless Scaling and the GPU driver.
-- **Controls:** turn the on-screen controller on or off, edit its layout, reset it.
+- **Controls:** turn the on-screen controller on or off; edit its layout (move, resize or reset the buttons). With the controller on, drag anywhere outside the buttons to turn the camera.
 - **Storage:** choose the game folder, quit.
 - **App:** check for updates (installing one closes the game, so save first).
 
