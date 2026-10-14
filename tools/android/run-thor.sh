@@ -75,6 +75,10 @@ export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # changes, undone in 0.5.1) and is not tested here on its own. BB_INDIRECT_GUARD=1 in
 # thor-local.sh turns it on.
 export BB_INDIRECT_GUARD=${BB_INDIRECT_GUARD:-0}
+# The two-stage draw pipeline (bb:DrawRec) turns itself on only with 8 or more CPUs the game may
+# use, so thor_cpus=3-7 turned it off. On, it frees the GPU command thread: 31 -> 34 FPS on the
+# Thor with all cores. BB_DRAW_PIPE=0 in thor-local.sh turns it off.
+export BB_DRAW_PIPE=${BB_DRAW_PIPE:-1}
 # Lossless Scaling frame generation (lsfg_multiplier 2-4): the lsfg-vk 1.0 layer with our Turnip
 # patches (bbport/arm64/lsfg, build_lsfg.sh) and Lossless.dll from the player's own Lossless
 # Scaling (Steam), next to the game folder or in bbport/. It replaces FSR 3.1 frame generation.

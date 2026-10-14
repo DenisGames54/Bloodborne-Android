@@ -62,14 +62,11 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
             .bindingCount = static_cast<u32>(bindings.size()),
             .pBindings = bindings.data(),
         }));
-        const vk::PushConstantRange range{.stageFlags = vk::ShaderStageFlagBits::eCompute,
-                                          .offset = 0,
-                                          .size = sizeof(u32)};
+        // No push constants (the range count is the dispatch size): a hoisted dispatch runs
+        // between a draw's recorded state and its pass, and must not disturb its push constants.
         p.layout = Check(device.createPipelineLayoutUnique({
             .setLayoutCount = 1,
             .pSetLayouts = &*p.set_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges = &range,
         }));
         const auto module = CompileSPV(BUFFER_MULTI_COPY_COMP, device);
         p.pipeline = Check(device.createComputePipelineUnique(
@@ -96,19 +93,11 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
     const u64 table_size = regions.size() * sizeof(u32);
     const u64 table_offset = stream.Copy(regions.data(), table_size, align);
 
-    if (auto* profiler = GpuProfiler::Get()) {
-        profiler->Mark(0xC0B1ull, [] { return std::string{"copy shader HLE: barrier + dispatch"}; });
-    }
-    scheduler.EndRendering();
     const u64 src_size = src_max - src_min, dst_size = dst_max - dst_min;
-    if (runtime.IsBufferAccessed(src, src_min, src_size) ||
-        runtime.IsBufferAccessed(dst, dst_min, dst_size, true)) {
-        runtime.FlushBarriers();
-    }
     const u32 count = static_cast<u32>(copies.size());
-    scheduler.RecordCrumb({.name = "HLE copy shader"}, [src = src->Handle(), dst = dst->Handle(), table = stream.Handle(), src_min,
-                      src_size, dst_min, dst_size, table_offset, table_size,
-                      count](vk::CommandBuffer cmdbuf) {
+    const auto dispatch = [src = src->Handle(), dst = dst->Handle(), table = stream.Handle(),
+                           src_min, src_size, dst_min, dst_size, table_offset, table_size,
+                           count](vk::CommandBuffer cmdbuf) {
         const std::array<vk::DescriptorBufferInfo, 3> infos{{
             {src, src_min, src_size},
             {dst, dst_min, dst_size},
@@ -123,10 +112,28 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
         }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *pipe.pipeline);
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pipe.layout, 0, writes);
-        cmdbuf.pushConstants(*pipe.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(count),
-                             &count);
         cmdbuf.dispatch(count, 1, 1);
-    });
+    };
+    // bbport: inside a render pass the dispatch goes in front of the pass when it cannot conflict
+    // with the pass's draws (Scheduler::TryHoist); the prepass fences it, no tracking here.
+    // The table is host-written stream memory at a fresh offset: it needs no ordering.
+    if (scheduler.IsRendering()) {
+        const Scheduler::HoistAccess read{src, src_min, src_min + src_size};
+        const Scheduler::HoistAccess write{dst, dst_min, dst_min + dst_size};
+        if (scheduler.TryHoist({&read, 1}, {&write, 1})) {
+            scheduler.RecordHoisted(dispatch);
+            return true;
+        }
+    }
+    if (auto* profiler = GpuProfiler::Get()) {
+        profiler->Mark(0xC0B1ull, [] { return std::string{"copy shader HLE: barrier + dispatch"}; });
+    }
+    scheduler.EndRendering();
+    if (runtime.IsBufferAccessed(src, src_min, src_size) ||
+        runtime.IsBufferAccessed(dst, dst_min, dst_size, true)) {
+        runtime.FlushBarriers();
+    }
+    scheduler.RecordCrumb({.name = "HLE copy shader"}, dispatch);
     runtime.AccessBuffer(src, src_min, src_size, vk::PipelineStageFlagBits2::eComputeShader,
                          vk::AccessFlagBits2::eShaderRead);
     runtime.AccessBuffer(dst, dst_min, dst_size, vk::PipelineStageFlagBits2::eComputeShader,

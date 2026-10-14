@@ -192,6 +192,8 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     CarrySuspend(false);
     is_rendering = true;
     render_state = new_state;
+    // bbport: buffer copies of this pass's draws may go in front of it (TryHoist).
+    OpenHoistWindow();
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
@@ -275,6 +277,7 @@ void Scheduler::EndRendering() {
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
     CarryResume(false);
+    CloseHoistWindow();
 }
 
 void Scheduler::TracePassBreak(void* caller) {
@@ -309,6 +312,425 @@ void Scheduler::TracePassBreak(void* caller) {
     callers.clear();
     breaks = 0;
     last = now;
+}
+
+namespace {
+
+// bbport: copy hoisting statistics (BB_FRAME_STATS or BB_PASS_BREAK_TRACE=1), printed every 5 s.
+enum HoistFallback : u32 {
+    HoistNotDeferred,      ///< recording is not deferred (direct mode)
+    HoistWindowClosed,     ///< a submission, cut or wait closed the pass's window, or none opened
+    HoistDstReadByPass,    ///< the destination is read or written by the pass's draws
+    HoistSrcWrittenByPass, ///< the source is written by the pass's draws
+    HoistTooManyRanges,    ///< the pass touched too many separate ranges to track
+    HoistFallbackCount,
+};
+std::atomic<u64> hoisted_commands{0};
+std::atomic<u64> hoist_fallbacks[HoistFallbackCount]{};
+std::atomic<u64> hoist_windows{0}, hoist_windows_spliced{0};
+
+bool HoistEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HOIST_COPIES");
+        const bool on = !(env && env[0] == '0');
+        std::printf("GPU: buffer copies inside render passes %s (BB_HOIST_COPIES=0: off)\n",
+                    on ? "are hoisted in front of the pass when they cannot conflict"
+                       : "end the pass");
+        return on;
+    }();
+    return enabled;
+}
+
+bool HoistStatsEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PASS_BREAK_TRACE");
+        return BbStats::enabled || (env && env[0] == '1');
+    }();
+    return enabled;
+}
+
+/// BB_HOIST_HOLD_SIGNALS=1: fences inside a hoist window wait for it to close instead of forcing
+/// the hand-over. Off by default: on the Thor it hoisted 7x more copies, but the later submissions
+/// left the GPU idle longer (28 instead of 34 FPS).
+bool HoistHoldSignals() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HOIST_HOLD_SIGNALS");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+/// BB_HOIST_HOLD_US (default 2000): how long a held signal waits for the next KickRecording to
+/// release it.
+std::chrono::microseconds HoistHoldTime() {
+    static const auto time = std::chrono::microseconds([] {
+        const char* env = std::getenv("BB_HOIST_HOLD_US");
+        return env ? std::max<long long>(0, std::strtoll(env, nullptr, 10)) : 2000ll;
+    }());
+    return time;
+}
+
+/// BB_HOIST_SPLIT_MULT (default 2, as without a window): a pass with a hoist window is cut into
+/// segments after this many times the segment length. Longer segments held the recording back
+/// (with BB_HOIST_HOLD_SIGNALS, slower on the Thor).
+size_t HoistSplitMult() {
+    static const size_t mult = [] {
+        const char* env = std::getenv("BB_HOIST_SPLIT_MULT");
+        return env ? size_t(std::max(2, std::atoi(env))) : size_t(2);
+    }();
+    return mult;
+}
+
+std::atomic<u64> hoist_closed_valve{0}, hoist_closed_cap{0}, hoist_closed_normal{0};
+
+void PrintHoistStats() {
+    static std::mutex mutex;
+    static auto last = std::chrono::steady_clock::now();
+    static u64 printed_hoisted = 0, printed_windows = 0, printed_spliced = 0;
+    static u64 printed_valve = 0, printed_cap = 0, printed_normal = 0;
+    static u64 printed_fallbacks[HoistFallbackCount]{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    const u64 hoisted = hoisted_commands.load(std::memory_order_relaxed);
+    const u64 windows = hoist_windows.load(std::memory_order_relaxed);
+    const u64 spliced = hoist_windows_spliced.load(std::memory_order_relaxed);
+    u64 fallbacks[HoistFallbackCount];
+    for (u32 i = 0; i < HoistFallbackCount; ++i) {
+        fallbacks[i] = hoist_fallbacks[i].load(std::memory_order_relaxed);
+    }
+    std::printf("Copy hoisting (%.0f s): %llu copies hoisted, %llu windows spliced of %llu opened; "
+                "not hoisted: %llu dst read by pass, %llu src written by pass, %llu window "
+                "closed, %llu not deferred, %llu too many ranges\n",
+                std::chrono::duration<double>(now - last).count(),
+                static_cast<unsigned long long>(hoisted - printed_hoisted),
+                static_cast<unsigned long long>(spliced - printed_spliced),
+                static_cast<unsigned long long>(windows - printed_windows),
+                static_cast<unsigned long long>(fallbacks[HoistDstReadByPass] -
+                                                printed_fallbacks[HoistDstReadByPass]),
+                static_cast<unsigned long long>(fallbacks[HoistSrcWrittenByPass] -
+                                                printed_fallbacks[HoistSrcWrittenByPass]),
+                static_cast<unsigned long long>(fallbacks[HoistWindowClosed] -
+                                                printed_fallbacks[HoistWindowClosed]),
+                static_cast<unsigned long long>(fallbacks[HoistNotDeferred] -
+                                                printed_fallbacks[HoistNotDeferred]),
+                static_cast<unsigned long long>(fallbacks[HoistTooManyRanges] -
+                                                printed_fallbacks[HoistTooManyRanges]));
+    const u64 valve = hoist_closed_valve.load(std::memory_order_relaxed);
+    const u64 cap = hoist_closed_cap.load(std::memory_order_relaxed);
+    const u64 normal = hoist_closed_normal.load(std::memory_order_relaxed);
+    std::printf("Copy hoisting windows closed: %llu normally (pass end, submission, cut, wait), "
+                "%llu by the idle valve (held signals), %llu by the time cap\n",
+                static_cast<unsigned long long>(normal - printed_normal),
+                static_cast<unsigned long long>(valve - printed_valve),
+                static_cast<unsigned long long>(cap - printed_cap));
+    printed_valve = valve;
+    printed_cap = cap;
+    printed_normal = normal;
+    printed_hoisted = hoisted;
+    printed_windows = windows;
+    printed_spliced = spliced;
+    for (u32 i = 0; i < HoistFallbackCount; ++i) {
+        printed_fallbacks[i] = fallbacks[i];
+    }
+    last = now;
+}
+
+// BB_HOIST_TRACE=1 (diagnostics): who closes a hoist window while its pass still runs, and why
+// windows do not open. Call stacks as library offsets, every 5 s.
+bool HoistTraceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HOIST_TRACE");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+void TraceHoist(const char* what) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, u64> stacks;
+    static auto last = std::chrono::steady_clock::now();
+    std::string key = what;
+    if (what[0] == 'c') { // "closed early": the call stack
+        void* frames[8];
+        const int count = backtrace(frames, 8);
+        for (int i = 2; i < count; ++i) {
+            Dl_info info{};
+            dladdr(frames[i], &info);
+            const char* name = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+            char part[96];
+            std::snprintf(part, sizeof(part), " %s+0x%lx", name ? name + 1 : "?",
+                          static_cast<unsigned long>(reinterpret_cast<uintptr_t>(frames[i]) -
+                                                     reinterpret_cast<uintptr_t>(info.dli_fbase)));
+            key += part;
+        }
+    }
+    std::scoped_lock lk{mutex};
+    ++stacks[key];
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    last = now;
+    std::vector<std::pair<u64, std::string>> top;
+    for (const auto& [stack, n] : stacks) {
+        top.emplace_back(n, stack);
+    }
+    std::ranges::sort(top, std::greater{});
+    for (size_t i = 0; i < std::min<size_t>(top.size(), 8); ++i) {
+        std::printf("Hoist trace: %llu x %s\n", static_cast<unsigned long long>(top[i].first),
+                    top[i].second.c_str());
+    }
+    stacks.clear();
+}
+
+void CountFallback(HoistFallback reason) {
+    if (HoistStatsEnabled()) {
+        hoist_fallbacks[reason].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+/// One barrier, recorded inside the prepass: `src` stages and writes to `dst` stages and accesses.
+vk::MemoryBarrier2 PrepassBarrier(vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access,
+                                  vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access) {
+    return {
+        .srcStageMask = src_stage,
+        .srcAccessMask = src_access,
+        .dstStageMask = dst_stage,
+        .dstAccessMask = dst_access,
+    };
+}
+
+constexpr vk::PipelineStageFlags2 CopyStages =
+    vk::PipelineStageFlagBits2::eAllTransfer | vk::PipelineStageFlagBits2::eComputeShader;
+constexpr vk::AccessFlags2 CopyAccess =
+    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite |
+    vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite;
+constexpr vk::AccessFlags2 CopyWrites =
+    vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderStorageWrite;
+constexpr vk::AccessFlags2 AllAccess =
+    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+
+} // namespace
+
+bool Scheduler::HoistRanges::Overlaps(const void* buffer, u64 start, u64 end) const noexcept {
+    for (const Range& range : tail) {
+        if (range.buffer == buffer && range.start < end && start < range.end) {
+            return true;
+        }
+    }
+    // The first range after the query's start, and the one before it (which may reach over it).
+    const Range key{buffer, start, start};
+    const auto next = std::ranges::upper_bound(merged, key, Before);
+    if (next != merged.end() && next->buffer == buffer && next->start < end) {
+        return true;
+    }
+    if (next != merged.begin()) {
+        const Range& before = *(next - 1);
+        return before.buffer == buffer && before.end > start;
+    }
+    return false;
+}
+
+bool Scheduler::HoistRanges::Add(const void* buffer, u64 start, u64 end) {
+    // Neighbours of one binding stream (ring allocations, a draw's buffers in turn) merge.
+    const size_t first = tail.size() > 4 ? tail.size() - 4 : 0;
+    for (size_t i = tail.size(); i-- > first;) {
+        Range& range = tail[i];
+        if (range.buffer == buffer && range.start <= end && start <= range.end) {
+            range.start = std::min(range.start, start);
+            range.end = std::max(range.end, end);
+            return true;
+        }
+    }
+    tail.push_back({buffer, start, end});
+    if (tail.size() >= 256) {
+        MergeTail();
+        return merged.size() <= MaxRanges;
+    }
+    return true;
+}
+
+void Scheduler::HoistRanges::MergeTail() {
+    std::ranges::sort(tail, Before);
+    std::vector<Range> all(merged.size() + tail.size());
+    std::ranges::merge(merged, tail, all.begin(), Before);
+    size_t out = 0;
+    for (const Range& range : all) {
+        if (out != 0 && all[out - 1].buffer == range.buffer && range.start <= all[out - 1].end) {
+            all[out - 1].end = std::max(all[out - 1].end, range.end);
+        } else {
+            all[out++] = range;
+        }
+    }
+    all.resize(out);
+    merged = std::move(all);
+    tail.clear();
+}
+
+void Scheduler::NoteDrawRange(const void* buffer, u64 start, u64 end, bool write) {
+    if (pass_overflow) {
+        return;
+    }
+    if (!(write ? pass_writes : pass_reads).Add(buffer, start, end)) {
+        pass_overflow = true;
+    }
+}
+
+void Scheduler::OpenHoistWindow() {
+    if (!IsRecordingDeferred() || carried_scope || !HoistEnabled()) {
+        if (HoistTraceEnabled()) {
+            TraceHoist(!IsRecordingDeferred() ? "not opened: not deferred"
+                       : carried_scope        ? "not opened: carried scope (occlusion query)"
+                                              : "not opened: off");
+        }
+        return;
+    }
+    // The pass starts at a chunk boundary: the commands of the draw so far (its state) stay in
+    // front, the pass's own chunks follow, and the prepass goes between them.
+    if (!CurrentChunk().Empty()) {
+        RetireChunk();
+    }
+    hoist_open = true;
+    hoist_split = full_chunks.size();
+    hoist_bytes0 = segment_bytes;
+    prepass_started = false;
+    pass_global_read = pass_global_write = pass_overflow = false;
+    pass_reads.Clear();
+    pass_writes.Clear();
+    prepass_reads.Clear();
+    prepass_writes.Clear();
+    if (HoistStatsEnabled()) {
+        hoist_windows.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void Scheduler::CloseHoistWindow() {
+    if (!hoist_open) {
+        return;
+    }
+    if (HoistTraceEnabled() && is_rendering) {
+        TraceHoist("closed early:");
+    } else if (HoistTraceEnabled() && resume_rendering) {
+        TraceHoist("cut: segment split inside the pass");
+    }
+    hoist_open = false;
+    if (HoistStatsEnabled()) {
+        (hoist_close_reason == HoistClose::IdleValve ? hoist_closed_valve
+         : hoist_close_reason == HoistClose::TimeCap ? hoist_closed_cap
+                                                      : hoist_closed_normal)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+    hoist_close_reason = HoistClose::Normal;
+    if (prepass_started) {
+        // The hoisted commands' writes are visible to everything after them.
+        RecordHoisted([barrier = PrepassBarrier(CopyStages, CopyWrites,
+                                                vk::PipelineStageFlagBits2::eAllCommands,
+                                                AllAccess)](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+        });
+        prepass_full.push_back(std::move(prepass_chunk));
+        prepass_chunk.reset();
+        // In front of the pass's first chunk. HandOver counts them with the others (handed,
+        // after), so the recording threads see one run of chunks.
+        size_t bytes = 0;
+        for (const auto& chunk : prepass_full) {
+            bytes += chunk->Size();
+        }
+        segment_bytes += bytes;
+        const auto at = full_chunks.begin() + std::min(hoist_split, full_chunks.size());
+        full_chunks.insert(at, std::make_move_iterator(prepass_full.begin()),
+                           std::make_move_iterator(prepass_full.end()));
+        prepass_full.clear();
+        prepass_started = false;
+        if (HoistStatsEnabled()) {
+            hoist_windows_spliced.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    pass_reads.Clear();
+    pass_writes.Clear();
+    prepass_reads.Clear();
+    prepass_writes.Clear();
+    if (HoistStatsEnabled()) {
+        PrintHoistStats();
+    }
+}
+
+bool Scheduler::TryHoist(std::span<const HoistAccess> reads, std::span<const HoistAccess> writes) {
+    // Outside a pass nothing ends (and the copy is recorded in stream order as it always was).
+    if (!is_rendering || !HoistEnabled()) {
+        return false;
+    }
+    if (!IsRecordingDeferred()) {
+        CountFallback(HoistNotDeferred);
+        return false;
+    }
+    if (!hoist_open) {
+        CountFallback(HoistWindowClosed);
+        return false;
+    }
+    ProducerScope producer{*this, "TryHoist"};
+    if (pass_overflow) {
+        CountFallback(HoistTooManyRanges);
+        return false;
+    }
+    // The copy moves in front of the draws already in the pass: it must not change what they
+    // read or write (its destination), nor read what they write (its source).
+    for (const HoistAccess& write : writes) {
+        if (pass_global_read || pass_global_write ||
+            pass_reads.Overlaps(write.buffer, write.start, write.end) ||
+            pass_writes.Overlaps(write.buffer, write.start, write.end)) {
+            CountFallback(HoistDstReadByPass);
+            return false;
+        }
+    }
+    for (const HoistAccess& read : reads) {
+        if (pass_global_write || pass_writes.Overlaps(read.buffer, read.start, read.end)) {
+            CountFallback(HoistSrcWrittenByPass);
+            return false;
+        }
+    }
+    if (!prepass_started) {
+        // Everything before the pass is done with the memory the copies touch.
+        prepass_started = true;
+        RecordHoisted([barrier = PrepassBarrier(vk::PipelineStageFlagBits2::eAllCommands, AllAccess,
+                                                CopyStages, CopyAccess)](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+        });
+    }
+    // The prepass runs its commands without barriers in between: one that depends on an earlier
+    // hoisted one (an upload and the copy of what it uploaded) gets one.
+    bool conflict = prepass_reads.Size() + prepass_writes.Size() > 4096;
+    for (const HoistAccess& write : writes) {
+        conflict = conflict || prepass_reads.Overlaps(write.buffer, write.start, write.end) ||
+                   prepass_writes.Overlaps(write.buffer, write.start, write.end);
+    }
+    for (const HoistAccess& read : reads) {
+        conflict = conflict || prepass_writes.Overlaps(read.buffer, read.start, read.end);
+    }
+    if (conflict) {
+        RecordHoisted([barrier = PrepassBarrier(CopyStages, CopyWrites, CopyStages,
+                                                CopyAccess)](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+        });
+        prepass_reads.Clear();
+        prepass_writes.Clear();
+    }
+    for (const HoistAccess& read : reads) {
+        prepass_reads.Add(read.buffer, read.start, read.end);
+    }
+    for (const HoistAccess& write : writes) {
+        prepass_writes.Add(write.buffer, write.start, write.end);
+    }
+    if (HoistStatsEnabled()) {
+        hoisted_commands.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {
@@ -369,6 +791,25 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
             done->fetch_add(1, std::memory_order_release);
         });
     });
+    // bbport: an open hoist window keeps its chunks, and the signal stays queued with them (the
+    // game's ~44 fences per frame cut every pass otherwise). See ReleaseHeldSignals.
+    if (hoist_open && HoistHoldSignals()) {
+        if (!held_signals) {
+            held_signals = true;
+            held_since = std::chrono::steady_clock::now();
+        }
+        return;
+    }
+    KickRecording(true);
+}
+
+void Scheduler::ReleaseHeldSignals() {
+    if (!held_signals) {
+        return;
+    }
+    if (hoist_open) {
+        hoist_close_reason = HoistClose::IdleValve;
+    }
     KickRecording(true);
 }
 
@@ -477,11 +918,30 @@ void Scheduler::KickRecording(bool force) {
         LeaveDirectSegment();
     }
     direct_mode = false;
+    // bbport: held signals (SignalAfterHostCopies) go out once their window is gone, or when
+    // they have waited long enough.
+    bool release = false;
+    if (held_signals && !force) {
+        if (!hoist_open) {
+            release = true;
+        } else if (std::chrono::steady_clock::now() - held_since >= HoistHoldTime()) {
+            release = true;
+            hoist_close_reason = HoistClose::TimeCap;
+        }
+    }
     if (!force) {
         MaybeSplit();
     }
+    // bbport: the chunks of a pass with an open hoist window stay here: a copy hoisted later
+    // goes in front of the pass's first chunk, which must not have been handed over.
+    // A pass that never ends nor is cut (one recording thread) hands over after a while: past
+    // the length where MaybeSplit cuts.
+    if (!force && !release && hoist_open &&
+        segment_bytes - hoist_bytes0 + CurrentChunk().Size() < (HoistSplitMult() + 2) * split_bytes) {
+        return;
+    }
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
+    if (!force && !release && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
         return;
     }
     HandOver();
@@ -494,7 +954,9 @@ void Scheduler::MaybeSplit() {
     }
     // Cutting inside a render pass closes and reopens it: only after a longer stretch.
     const size_t bytes = segment_bytes + CurrentChunk().Size();
-    if (bytes < (is_rendering ? 2 * split_bytes : split_bytes)) {
+    // (A pass with a hoist window is cut later: a cut ends the window and reopens the pass.)
+    const size_t pass_mult = hoist_open ? HoistSplitMult() : 2;
+    if (bytes < (is_rendering ? pass_mult * split_bytes : split_bytes)) {
         return;
     }
     if (is_rendering) {
@@ -530,6 +992,11 @@ void Scheduler::HandOver() {
         ReportProducer("REENTERED recording", u32(gettid()), inside, "HandOver");
     }
     ProducerScope producer{*this, "HandOver"};
+    // bbport: whatever hands chunks over (a submission, a cut, a wait for the recording threads)
+    // ends the hoist window first: the prepass joins the chunks handed over, in front of the
+    // pass's.
+    CloseHoistWindow();
+    held_signals = false; // the ordered chunks below carry them
     if (!record_chunk || !ordered_chunk) {
         // Left behind by another HandOver interrupted between handing a chunk over and
         // taking a new one (see ProducerScope). Recover instead of dereferencing null.
@@ -652,6 +1119,7 @@ void Scheduler::EnterDirectMode() {
     }();
     if (own_segment && async_submit && current_segment + 2 < MaxSegments &&
         !BbToggle::Disabled(BbToggle::ThreadedRecording)) {
+        CloseHoistWindow();
         if (is_rendering) {
             CarrySuspend(true);
             Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
