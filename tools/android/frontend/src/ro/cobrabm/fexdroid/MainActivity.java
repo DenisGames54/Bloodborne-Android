@@ -141,15 +141,8 @@ public final class MainActivity extends Activity {
             @Override public void surfaceChanged(SurfaceHolder h,int format,int w,int height) {}
             @Override public void surfaceDestroyed(SurfaceHolder h) { DisplayBridge.stop(); }
         });
-        surface.setOnTouchListener((v,e) -> {
-            if (shmid<0 || drawerOpen) return true;
-            XInput.moveTo(Math.round(e.getX()*1280/Math.max(1,v.getWidth())),
-                          Math.round(e.getY()*720/Math.max(1,v.getHeight())));
-            if (e.getActionMasked()==MotionEvent.ACTION_DOWN) XInput.button(1,true);
-            if (e.getActionMasked()==MotionEvent.ACTION_UP || e.getActionMasked()==MotionEvent.ACTION_CANCEL)
-                XInput.button(1,false);
-            return true;
-        });
+        // Touches on the game display send no mouse input (the game is played with a controller).
+        surface.setOnTouchListener((v,e) -> true);
         status=text("Starting Bloodborne…",18,0xffc6ad76); status.setGravity(Gravity.CENTER);
         screen.addView(status,frame(-1,-1,Gravity.CENTER));
         status.setClickable(false);
@@ -230,14 +223,10 @@ public final class MainActivity extends Activity {
             controllerOverlay.release();
             closeDrawer();
         });
-        menuItem("ic_edit","Edit controller layout","Drag and resize the buttons",() -> {
+        menuItem("ic_edit","Edit controller layout","Move, resize or reset the buttons",() -> {
             getSharedPreferences("bloodborne",MODE_PRIVATE).edit().putBoolean("controller_overlay",true).apply();
             closeDrawer();
             controllerOverlay.edit(null);
-        });
-        menuItem("ic_restore","Reset controller layout",null,() -> {
-            controllerOverlay.resetLayout();
-            closeDrawer();
         });
 
         section("Storage");

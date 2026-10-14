@@ -58,6 +58,24 @@ def load_mods():
 mods = load_mods()
 
 
+# Android: the app can see /storage/emulated/0 but not always /storage/emulated (lstat: ENOENT),
+# so a strict realpath of a shared-storage path fails although the path exists (mods.py resolves
+# the game and mod folders strictly). Strict here means: the path exists.
+_realpath = os.path.realpath
+
+
+def _shared_storage_realpath(path, *, strict=False):
+    try:
+        return _realpath(path, strict=strict)
+    except FileNotFoundError:
+        if strict and os.path.exists(path):
+            return _realpath(path)
+        raise
+
+
+os.path.realpath = _shared_storage_realpath
+
+
 def load_game_check():
     """scripts/game_check.py (it imports prepare.py from its own folder)."""
     for candidate in (HERE / 'game_check.py', HERE.parent.parent / 'scripts' / 'game_check.py'):
