@@ -555,6 +555,17 @@ class InstallGameTests(PkgTestCase):
         self.assertEqual([p.name for p in game.iterdir() if p.name.lower() == 'dvdroot_ps4'], ['DVDROOT_PS4'])
         self.assertEqual((game / 'DVDROOT_PS4/Chr/a.dcx').read_bytes(), b'new a')
 
+    def test_update_reports_moving_progress(self):
+        self.plan(files=self.base_files())
+        self.assertTrue(self.install(self.base)[0]['ok'])
+        files = self.update_files()
+        self.plan(files=files)
+        result, progress, _ = self.install(self.update)
+        self.assertTrue(result['ok'])
+        total = sum(len(v.encode() if isinstance(v, str) else v) for v in files.values())
+        self.assertIn(f'progress 0 {total} Installing', progress)
+        self.assertIn(f'progress {total} {total} Installing', progress)
+
     def test_update_without_game(self):
         self.plan(files=self.update_files())
         result = self.install(self.update)[0]

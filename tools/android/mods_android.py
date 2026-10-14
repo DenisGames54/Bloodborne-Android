@@ -544,21 +544,57 @@ def command_install_pkg(args):
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
 
-def merge_tree(source, target):
+def tree_bytes(folder):
+    """The size of the files under `folder` (links not followed)."""
+    total = 0
+    for directory, _, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def merge_tree(source, target, moved=None):
     """Move the files of `source` over the folder `target` (rename each, replacing; same filesystem).
-    Names match the existing ones case-insensitively; eboot.bin and sce_sys go last."""
+    Names match the existing ones case-insensitively; eboot.bin and sce_sys go last. `moved(size)`
+    after each file."""
     target = Path(target)
     if target.is_symlink() or (target.exists() and not target.is_dir()):
         target.unlink()
     target.mkdir(exist_ok=True)
+    # One listing per folder (mods.child lists it for each name: an update's ~13,000 files took
+    # many minutes over Android's shared storage).
+    existing = {}
+    for entry in target.iterdir():
+        existing.setdefault(entry.name.casefold(), entry)
     for entry in sorted(Path(source).iterdir(), key=lambda e: (e.name.casefold() in LAST_NAMES, e.name)):
-        destination = mods.child(target, entry.name)
+        destination = existing.get(entry.name.casefold(), target / entry.name)
         if entry.is_dir() and not entry.is_symlink():
-            merge_tree(entry, destination)
+            merge_tree(entry, destination, moved)
         else:
+            size = entry.lstat().st_size
             if destination.is_dir() and not destination.is_symlink():
                 shutil.rmtree(destination)
             os.replace(entry, destination)
+            if moved:
+                moved(size)
+
+
+class MoveProgress:
+    """`progress` lines for merge_tree: bytes moved of `total`, every 32 MiB and at the end."""
+    STEP = 32 * MIB
+
+    def __init__(self, total, label):
+        self.total, self.label, self.done, self.shown = total, label, 0, -1
+        progress(0, total, label)
+
+    def __call__(self, size):
+        self.done += size
+        if self.done - self.shown >= self.STEP or self.done >= self.total:
+            self.shown = self.done
+            progress(min(self.done, self.total), self.total, self.label)
 
 
 def game_layout(dest, title, has_game):
@@ -636,7 +672,7 @@ def install_game(args, state, result):
             raise
         result['gameDir'] = str(game)
     else:
-        merge_tree(root, game)
+        merge_tree(root, game, MoveProgress(tree_bytes(root), 'Installing'))
         result['gameDir'] = str(game)
     progress(0, 0, 'Checking')
     try:
