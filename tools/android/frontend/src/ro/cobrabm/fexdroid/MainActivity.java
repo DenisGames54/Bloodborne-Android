@@ -68,6 +68,8 @@ public final class MainActivity extends Activity {
     private DriverDownloadDialog driverDownload;
     private ModsDialog mods;
     private GameInstaller installer;
+    private AppUpdater updater;
+    private LinearLayout updateItem;
     private volatile long gameStartedAt;
     private boolean drawerOpen, displayOnly, startingX, hadError, swipeConsumed;
     private float touchX, touchY;
@@ -81,6 +83,14 @@ public final class MainActivity extends Activity {
         drivers=new DriverManager(new File(FILES));
         GameInstaller.Host host=modsHost();
         mods=new ModsDialog(this,host); installer=new GameInstaller(this,host);
+        updater=new AppUpdater(this,new AppUpdater.Host() {
+            @Override public void stopGame() { MainActivity.this.stopGame(); }
+            @Override public void restartGame() { if (!destroyed && shmid>=0) MainActivity.this.restartGame(); }
+            @Override public void detail(String text) { setDetail(updateItem,text); }
+            @Override public void closed() { if (!destroyed) immersive(); }
+            @Override public boolean destroyed() { return destroyed; }
+        });
+        worker.execute(updater::cleanup); // downloads an earlier run left
         gameDir=getSharedPreferences("bloodborne",MODE_PRIVATE).getString("game_dir",null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT>=28) {
@@ -233,6 +243,9 @@ public final class MainActivity extends Activity {
         menuItem("ic_exit","Quit game",null,() -> new AlertDialog.Builder(this)
             .setTitle("Quit Bloodborne?").setMessage("Any unsaved progress will be lost.")
             .setNegativeButton("Cancel",null).setPositiveButton("Quit",(dialog,which) -> finish()).show());
+
+        section("App");
+        updateItem=menuItem("ic_refresh","Check for updates","Version "+updater.version(),() -> updater.check());
 
         // The version, pinned under the scrolling menu.
         String version="";
@@ -435,7 +448,10 @@ public final class MainActivity extends Activity {
         if (audio!=null) audio.pause();
         super.onPause();
     }
-    @Override protected void onResume() { super.onResume(); if (audio!=null) audio.resume(); }
+    @Override protected void onResume() {
+        super.onResume(); if (audio!=null) audio.resume();
+        if (updater!=null) updater.resumed(); // back from the "install unknown apps" setting
+    }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         // Deterministic UI checks over ADB, using the same handlers as the actual controls.
@@ -472,6 +488,9 @@ public final class MainActivity extends Activity {
     private void startX(SurfaceHolder holder) {
         try {
             RuntimeInstaller.ensure(this, new File(FILES), message -> main.post(() -> status.setText(message)));
+            // The runtime brought bbport.default.ini: settings defaults apply before the game reads bbport.ini.
+            try { SettingsDefaults.apply(new File(BASE)); main.post(() -> { if (drawerOpen) refreshDrawer(); }); }
+            catch (Exception ex) { android.util.Log.e("Bloodborne","default settings: "+ex); }
             if (!new File(ROOT,"usr/bin/Xvfb").canExecute() || !new File(BASE,"run-thor.sh").isFile())
                 throw new java.io.IOException("The Bloodborne runtime is missing. Install the runtime bundle.");
             new File(FILES,"home/bbport").mkdirs();
@@ -952,7 +971,7 @@ public final class MainActivity extends Activity {
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {
-        destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
+        destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); if (updater!=null) updater.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
         DisplayBridge.stop(); stopGame(); if (xvfb!=null) xvfb.destroyForcibly();
         worker.shutdownNow(); super.onDestroy();
     }

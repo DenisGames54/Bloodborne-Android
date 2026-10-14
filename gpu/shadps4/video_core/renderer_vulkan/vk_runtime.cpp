@@ -113,6 +113,36 @@ void Runtime::TickFrame() {
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                          std::span<const vk::BufferCopy> copies) {
+    // bbport: inside a render pass, a copy that cannot conflict with the pass's draws goes in
+    // front of the pass instead of ending it (Scheduler::TryHoist). The prepass fences it on both
+    // sides: no tracking here.
+    if (scheduler.IsRendering() && !copies.empty()) {
+        boost::container::small_vector<Scheduler::HoistAccess, 8> reads, writes;
+        if (copies.size() > 4) {
+            u64 src_min = ~0ULL, src_max = 0, dst_min = ~0ULL, dst_max = 0;
+            for (const auto& copy : copies) {
+                src_min = std::min<u64>(src_min, copy.srcOffset);
+                src_max = std::max<u64>(src_max, copy.srcOffset + copy.size);
+                dst_min = std::min<u64>(dst_min, copy.dstOffset);
+                dst_max = std::max<u64>(dst_max, copy.dstOffset + copy.size);
+            }
+            reads.push_back({src, src_min, src_max});
+            writes.push_back({dst, dst_min, dst_max});
+        } else {
+            for (const auto& copy : copies) {
+                reads.push_back({src, copy.srcOffset, copy.srcOffset + copy.size});
+                writes.push_back({dst, copy.dstOffset, copy.dstOffset + copy.size});
+            }
+        }
+        if (scheduler.TryHoist(reads, writes)) {
+            scheduler.RecordHoisted([src_handle = src->Handle(), dst_handle = dst->Handle(),
+                                     regions = scheduler.RecordHoistedData(copies)](
+                                        vk::CommandBuffer cmdbuf) {
+                cmdbuf.copyBuffer(src_handle, dst_handle, regions.size(), regions.data());
+            });
+            return;
+        }
+    }
     scheduler.EndRendering();
 
     // bbport: many regions (HLE copy shaders) are tracked as one bounding range per buffer:
