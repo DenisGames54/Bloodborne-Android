@@ -184,7 +184,8 @@ final class GameInstaller {
     private void run() {
         final File pkg=pending; final boolean temporary=pendingTemp; pending=null;
         busy=true; cancel.set(false);
-        progress=new PkgProgressDialog(activity,"Install game","Starting…",cancel);
+        // The first install on a new app also unpacks the app's runtime (host.scriptStream): some seconds.
+        progress=new PkgProgressDialog(activity,"Install game","Preparing…",cancel);
         background(() -> {
             JSONObject result=null; String failure=null; boolean cancelled=false;
             try {

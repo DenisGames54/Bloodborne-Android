@@ -478,6 +478,13 @@ public final class MainActivity extends Activity {
         env.put("LIBGL_DRIVERS_PATH",ROOT+"/usr/lib/aarch64-linux-gnu/dri");
         return b.start();
     }
+    /** The runtime's scripts (mods.sh: PKG and mod installs) are needed before any game has started:
+     *  the runtime is otherwise unpacked only by startX. Blocks (off the UI thread). */
+    private void ensureRuntime() throws java.io.IOException {
+        try { RuntimeInstaller.ensure(this,new File(FILES),message -> {}); }
+        catch (java.io.IOException e) { throw e; }
+        catch (Exception e) { throw new java.io.IOException("The app's runtime could not be installed: "+e.getMessage(),e); }
+    }
     private void startX(SurfaceHolder holder) {
         try {
             RuntimeInstaller.ensure(this, new File(FILES), message -> main.post(() -> status.setText(message)));
@@ -713,6 +720,7 @@ public final class MainActivity extends Activity {
     private GameInstaller.Host modsHost() {
         return new GameInstaller.Host() {
             @Override public String script(String... args) throws java.io.IOException {
+                ensureRuntime();
                 if (!new File(BASE,ModsDialog.SCRIPT).isFile()) return null;
                 Process p=process(scriptCommand(ModsDialog.SCRIPT,args));
                 try {
@@ -726,6 +734,7 @@ public final class MainActivity extends Activity {
                 finally { p.destroyForcibly(); }
             }
             @Override public boolean scriptStream(String script,java.util.function.Consumer<String> lines,AtomicBoolean cancel,String... args) throws java.io.IOException {
+                ensureRuntime();
                 if (!new File(BASE,script).isFile()) return false;
                 Process p=process(scriptCommand(script,args));
                 // Cancel (or the app closing) stops the process, which ends the read below.
