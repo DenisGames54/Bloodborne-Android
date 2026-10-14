@@ -98,9 +98,11 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
     state.depth_stencil_attachment.image_layout = vk::ImageLayout::eDepthAttachmentOptimal;
     state.depth_stencil_attachment.has_depth = true;
     state.depth_stencil_attachment.depth_clear = true;
+    // CommandBuffer() first: entering direct recording ends an active render pass and moves to a
+    // new command buffer, so the pass begun before it would not be open for the draw below.
+    const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BeginRendering(state);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
     const Vulkan::Breadcrumbs::Scope crumb{cmdbuf, scheduler.CrumbStream(), "blit helper"};
     const vk::DescriptorImageInfo image_info = {
         .sampler = VK_NULL_HANDLE,
@@ -200,9 +202,11 @@ void BlitHelper::CopyBetweenMsImages(u32 width, u32 height, u32 num_samples,
     state.color_attachments[0].image_view = dst_view;
     state.color_attachments[0].image_layout = vk::ImageLayout::eColorAttachmentOptimal;
     state.color_attachments[0].is_clear = true;
+    // CommandBuffer() first: entering direct recording ends an active render pass and moves to a
+    // new command buffer, so the pass begun before it would not be open for the draw below.
+    const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BeginRendering(state);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
     const Vulkan::Breadcrumbs::Scope crumb{cmdbuf, scheduler.CrumbStream(), "blit helper"};
     const vk::DescriptorImageInfo image_info = {
         .sampler = VK_NULL_HANDLE,
